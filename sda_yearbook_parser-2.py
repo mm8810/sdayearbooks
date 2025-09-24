@@ -1,231 +1,482 @@
 
-from PyPDF2 import PdfReader
-import re, os, csv, unicodedata
-from typing import List, Dict
+#!/usr/bin/env python3
+"""
 
-STATE_ALIASES = {
-    "Mich.":"MI","Mass.":"MA","Cal.":"CA","Cal":"CA","Wis.":"WI","Vt.":"VT","Vt":"VT",
-    "Me.":"ME","Me":"ME","Ill.":"IL","Ind.":"IN","Iowa":"IA","Iowa.":"IA","Iowa,":"IA",
-    "Kan.":"KS","Ky.":"KY","Mo.":"MO","Neb.":"NE","Nebr.":"NE","N. Y.":"NY","N. Y":"NY","N.Y.":"NY",
-    "N. H.":"NH","R. I.":"RI","Minn.":"MN","Col.":"CO","Col":"CO","Colo.":"CO","Ohio":"OH","0.":"OH","O.":"OH",
-    "Oreg.":"OR","Oregon":"OR","W. T.":"WA","W. T":"WA","Wash.":"WA","Tenn.":"TN","Tex.":"TX","Ala.":"AL",
-    "D. C.":"DC","D. T.":"Dakota Terr.","P. Q.":"Quebec","Ont.":"Ontario","Que.":"Quebec","Canada":"Canada",
-    "Prussia":"Prussia","Norway":"Norway","England":"England","Scotland":"Scotland","Sweden":"Sweden",
-    "Denmark":"Denmark","Switzerland":"Switzerland","Germany":"Germany","Prussia.":"Prussia",
-    "Dakota":"Dakota","Iowa;":"IA","Iowa,":"IA","Mo":"MO"
+This script scans the entire PDF, detects directory-like sections, tracks hierarchy
+(Section/Directory -> Subsection/Conference/Region -> Group), and extracts roster lines.
+
+It writes two sheets:
+- "yearbook_directory": unified, normalized rows
+- "parse_errors": raw lines that couldn't parse
+
+USAGE:
+  python parse_sda_yearbook_all_dirs.py YB1883.pdf -o YB1883_all_dirs.xlsx
+  python parse_sda_yearbook_all_dirs.py YB1883.pdf -o out.xlsx --template-xlsx YB1884.xlsx
+"""
+
+import argparse
+import re
+from dataclasses import dataclass
+from typing import List, Dict, Optional, Tuple
+
+import pdfplumber
+import pandas as pd
+import ollama
+
+# ------------------------------------------------------------
+# Config: output schema (will realign to template if provided)
+# ------------------------------------------------------------
+BASE_COLUMNS = [
+    "directory",              # NEW: high-level section, e.g., 'CONFERENCE DIRECTORY'
+    "conference",             # e.g., 'California Conference'
+    "region",                 # e.g., 'California', 'District No. 1'
+    "institution-name",       # e.g., 'Pacific Press'
+    "organization",           # umbrella org, if applied
+    "group",                  # e.g., 'Officers', 'Executive Committee'
+    "position-information",   # text payload on/near position (e.g., 'acting', 'corresponding')
+    "position",               # President, Secretary, Treasurer, Member, etc.
+    "prefix",
+    "name",
+    "lastname",
+    "suffix",
+    "location",
+    "yearbook-year",
+    "page",
+    "raw_line",               # keep a copy of the source line that produced the row
+]
+
+# Common title/role tokens you’ll see across directories
+ROLE_TOKENS = [
+    "President", "Vice-President", "Vice President", "Secretary", "Treasurer",
+    "Recording Secretary", "Corresponding Secretary", "Gen. Secretary", "General Secretary",
+    "State Agent", "Executive Committee", "Committee", "Member", "Editor",
+    "Business Manager", "Manager", "Superintendent", "Director",
+    "Assistant", "Asst.", "Advisory Board", "Trustee", "Board of Trustees",
+    "Directors", "Publishing Committee", "Librarian",
+]
+
+# Name affixes
+PREFIXES = {
+    "Eld.", "Elder", "Bro.", "Brother", "Mr.", "Mrs.", "Miss", "Dr.", "Dr",
+    "Pastor", "Pr.", "Prof.", "Sister", "Sr."
 }
+SUFFIXES = {"Jr.", "Sr.", "II", "III", "IV", "M.D.", "MD", "D.D.", "Ph.D."}
 
-PREFIX_GENDER = {
-    "Mrs.":"female","Miss":"female","Ms.":"female","Sister":"female","Sis.":"female",
-    "Mr.":"male","Elder":"male","Eld.":"male","Br.":"male","Brother":"male",
-    "Dr.":"unknown","Prof.":"unknown","Rev.":"unknown","Madam":"female","Mme.":"female","Sir":"male"
-}
-PREFIXES = sorted(PREFIX_GENDER.keys(), key=len, reverse=True)
-SUFFIXES = ["M. D.","M.D.","MD","Jr.","Sr.","Esq.","Esq","Ph.D.","D.D."]
+# Headings detection
+ALLCAPS_LINE = re.compile(r"^[A-Z0-9 ,.'&()\/\-]+$")
 
-ALLOWED_ROLE_PREFIXES = tuple([
-    "President","Vice","Secretary","Treasurer","Assistant","Associate","Auditor","Executive",
-    "Directors","Board","Committee","Agents","Superintendent","Superintendents","Field",
-    "Publishing","Medical","Educational","Missionary","Manager","Managers","Supt.","Negro",
-    "Bureau","Home Missionary","Sabbath","Missionary Volunteer","Religious Liberty"
-])
-DENY_ROLES = {"Territory","Cable Address","Telegraphic Address","Express and Freight Address",
-              "Postal Address","Organized","Telegraphic","Express","Freight","Address",
-              "Directory","Officers","Elective Members","General Members","Headquarters",
-              "Office Address","Office","General"}
+# Lines that strongly indicate a *section* heading for a directory
+SECTION_KEYS = [
+    "DIRECTORY", "DIRECTORIES",
+    "CONFERENCE", "STATE", "GENERAL CONFERENCE",
+    "SABBATH", "TRACT", "MISSION", "PUBLISH", "INSTITUTION", "SANITARIUM", "COLLEGE", "SCHOOL",
+    "BIBLE", "EDUCATION", "ASSOCIATION", "SOCIETY", "SOCIETIES", "DISTRICT"
+]
 
-ROLE_SEGMENT_PATTERN = re.compile(r'([A-Za-z][A-Za-z \-\.\(\)&/]*?)\s*:\s*(.*?)(?=(?: [A-Z][A-Za-z \-\.\(\)&/]{0,40}\s*:\s)|$)')
+# Splitters between position and the rest
+POS_SPLIT = re.compile(r"\s*(?:—|–|-|:)\s*")
 
-STATE_HEADINGS = {h.upper() for h in [
-    "California","Canada","Colorado","Dakota Territory","Denmark","Illinois","Indiana","Iowa","Kansas","Kentucky",
-    "Maine","Michigan","Minnesota","Missouri","Nebraska","New England","New York","North Pacific","Ohio",
-    "Pennsylvania","Sweden","Tennessee","Texas","Upper Columbia","Vermont","Wisconsin"
-]}
+# Split on first comma (Name, Location)
+FIRST_COMMA_SPLIT = re.compile(r"\s*,\s*")
 
-def extract_pages_text(path: str) -> List[str]:
-    reader = PdfReader(path)
-    pages = []
-    for i, page in enumerate(reader.pages):
-        try:
-            txt = page.extract_text() or ""
-        except Exception:
-            txt = ""
-        pages.append(txt)
-    return pages
+# ------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------
 
-def clean_line(s: str) -> str:
-    s = unicodedata.normalize("NFKC", s)
-    s = s.replace("—","-").replace("•","")
-    s = re.sub(r'\s+',' ', s).strip()
-    return s
+def norm(s: str) -> str:
+    return " ".join(s.replace("—", "-").replace("–", "-").split())
 
-def is_heading(line: str) -> bool:
-    s = line.strip()
-    if not s or any(k in s for k in ["Page", "PREFACE"]): 
+def is_allcaps_heading(line: str) -> bool:
+    L = line.strip()
+    if len(L) < 2 or len(L) > 80:
         return False
-    letters = re.sub(r'[^A-Za-z]','',s)
-    if not letters: 
+    if ALLCAPS_LINE.match(L) is None:
         return False
-    upper_ratio = sum(1 for c in letters if c.isupper()) / max(1,len(letters))
-    if upper_ratio > 0.9 and len(s) >= 4:
-        return True
-    if "DIRECTORY" in s.upper():
-        return True
-    return False
-
-def is_personnel_context(major: str) -> bool:
-    if not major:
+    # mixed cases like 'No.' allowed; keep permissive
+    # avoid pure page numbers
+    if re.fullmatch(r"\d{1,4}", L):
         return False
-    up = major.upper()
-    if any(bad in up for bad in ["PROCEEDINGS","STATISTICS","CONSTITUTION","CATALOGUE","CALENDAR","POSTAL RATES"]):
+    return True
+
+def looks_like_section_header(line: str) -> bool:
+    if not is_allcaps_heading(line):
         return False
-    return any(tok in up for tok in ["DIRECTORY","OFFICERS","DEPARTMENT","ASSOCIATION","CONFERENCE","PUBLISHING","SANITARIUM","SOCIETY"])
+    L = line.upper()
+    # A directory section header usually mentions one of our keys
+    return any(k in L for k in SECTION_KEYS)
 
-def detect_year_from_path(path: str):
-    m = re.search(r'YB(\d{4})\.pdf$', os.path.basename(path))
-    return int(m.group(1)) if m else None
+def looks_like_subheader(line: str) -> bool:
+    # Subheaders (Conference/Region/Institution names) tend to be ALLCAPS but
+    # without the big "DIRECTORY" keyword.
+    if not is_allcaps_heading(line):
+        return False
+    L = line.upper()
+    if any(k in L for k in ["DIRECTORY", "DIRECTORIES"]):
+        return False
+    return True
 
-def split_role_entries(content: str):
-    return [p.strip(" ;") for p in re.split(r';\s*', content) if p.strip(" ;")]
+def split_name_block(name_block: str) -> Tuple[Optional[str], str, str, Optional[str]]:
+    s = norm(name_block)
+    tokens = s.split()
+    if not tokens:
+        return None, "", "", None
 
-def parse_person_chunk(chunk: str) -> Dict[str, str]:
-    original = chunk
     prefix = None
-    for pf in PREFIXES:
-        if chunk.startswith(pf+" "):
-            prefix = pf
-            chunk = chunk[len(pf):].strip()
-            break
-    location_raw = None
-    if "," in chunk:
-        name_part, loc_part = chunk.split(",", 1)
-        name = name_part.strip()
-        location_raw = loc_part.strip().strip(",")
-    else:
-        name = chunk.strip()
-    suffix_found = None
-    for suf in SUFFIXES:
-        if name.endswith(" "+suf):
-            suffix_found = suf
-            name = name[:-(len(suf)+1)].strip()
-    gender = PREFIX_GENDER.get(prefix, "unknown")
-    return {
-        "name_prefix": prefix,
-        "full_name": name,
-        "name_suffix": suffix_found,
-        "gender_inferred": gender,
-        "location_raw": location_raw,
-        "original_chunk": original
-    }
+    suffix = None
 
-def parse_location_fields(location_raw: str):
-    if not location_raw:
-        return {"city": None, "state_or_region": None, "country": None}
-    parts = [p.strip() for p in location_raw.split(",")]
-    city = parts[0] if parts else None
-    region = None
-    country = None
-    if len(parts) >= 2:
-        token = parts[-1]
-        mapped = STATE_ALIASES.get(token, token)
-        if mapped in {"England","Scotland","Prussia","Norway","Denmark","Sweden","Switzerland","Germany","Canada","Quebec","Ontario","Dakota Terr.","Dakota"}:
-            country = mapped
-            if len(parts) >= 2:
-                region = parts[-2]
-        else:
-            region = mapped
-            if mapped in {"MI","MA","CA","WI","VT","ME","IL","IN","IA","KS","KY","MO","NE","NY","NH","RI","MN","CO","OH","OR","WA","TN","TX","AL","DC"}:
-                country = "USA"
-            elif mapped in {"Ontario","Quebec","Canada"}:
-                country = "Canada"
-    return {"city": city, "state_or_region": region, "country": country}
+    # prefix
+    if tokens[0] in PREFIXES or (tokens[0].rstrip(".") + ".") in PREFIXES:
+        prefix = tokens.pop(0)
 
-def parse_pdf(path: str):
-    year = detect_year_from_path(path)
-    pages = extract_pages_text(path)
-    records = []
-    major = None
-    suborg = None
-    buffer_role = None
-    buffer_text = None
-    for page in pages:
-        lines = [clean_line(ln) for ln in (page.split("\\n") if page else [])]
-        for line in lines:
-            if not line:
-                continue
-            if is_heading(line):
-                text = line.strip(" .")
-                up = text.upper()
-                if up in STATE_HEADINGS:
-                    suborg = text.title()
-                else:
-                    if "CALENDAR" not in up:
-                        major = text.title()
-                        if "STATE CONFERENCE DIRECTORIES" not in up:
-                            suborg = None
-                continue
-            segments = list(ROLE_SEGMENT_PATTERN.finditer(line))
-            if segments:
-                for seg in segments:
-                    if buffer_role is not None and is_personnel_context(major):
-                        for chunk in split_role_entries(buffer_text.strip()):
-                            person = parse_person_chunk(chunk)
-                            loc = parse_location_fields(person["location_raw"])
-                            records.append({
-                                "source_file": os.path.basename(path),
-                                "source_year": year,
-                                "section": major,
-                                "organization": suborg if suborg else major,
-                                "role_title": buffer_role.strip(),
-                                **person, **loc
+    # suffix
+    if tokens and tokens[-1] in SUFFIXES:
+        suffix = tokens.pop()
+
+    if not tokens:
+        return prefix, "", "", suffix
+
+    if len(tokens) == 1:
+        return prefix, "", tokens[0].rstrip(",").strip(), suffix
+
+    lastname = tokens[-1].rstrip(",").strip()
+    given = " ".join(tokens[:-1])
+    return prefix, given, lastname, suffix
+
+def extract_position(line_left: str) -> Tuple[Optional[str], Optional[str], str]:
+    """
+    Attempt to split 'Position — Name, Location' patterns.
+    Returns (position, position_info, remainder_after_position)
+    """
+    # Examples:
+    # 'President—J. H. Waggoner, Oakland, Cal.'
+    # 'Recording Secretary: A. Smith, Battle Creek, Mich.'
+    # 'Executive Committee—J. Doe; R. Roe; A. Poe, City, ST'
+    L = line_left
+    # Try to split on the first dash/colon that looks like a position separator
+    m = POS_SPLIT.split(L, maxsplit=1)
+    if len(m) == 2:
+        maybe_pos, rest = m[0].strip(), m[1].strip()
+        # position-info heuristic: in cases like 'Assistant Secretary'
+        # we treat whole left side as position (we’ll not overfit here)
+        position = maybe_pos
+        pos_info = None
+        return position, pos_info, rest
+    # Could be 'President, J. H. Waggoner, Oakland...' (rare)
+    if "," in L:
+        left, rest = L.split(",", 1)
+        if any(tok.lower() in left.lower() for tok in ["president", "secretary", "treasurer", "committee", "editor", "manager", "trustee", "director", "agent"]):
+            return left.strip(), None, rest.strip()
+    return None, None, L
+
+def split_name_and_location(s: str) -> Tuple[str, str]:
+    """
+    Split 'Name, Location' on first comma. If no comma, return (s, "").
+    """
+    parts = FIRST_COMMA_SPLIT.split(s, maxsplit=1)
+    if len(parts) == 1:
+        return parts[0].strip(), ""
+    return parts[0].strip(), parts[1].strip()
+
+def clean_text_lines(page_text: str) -> List[str]:
+    lines = []
+    for raw in (page_text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if re.fullmatch(r"\d{1,4}", line):  # likely an isolated page number
+            continue
+        lines.append(line)
+    return lines
+
+def infer_year_from_filename(path: str) -> Optional[int]:
+    m = re.search(r"(18|19)\d{2}", path)
+    return int(m.group(0)) if m else None
+
+# ------------------------------------------------------------
+# Parser state
+# ------------------------------------------------------------
+
+@dataclass
+class Ctx:
+    year: Optional[int]
+    directory: Optional[str] = None   # e.g., 'CONFERENCE DIRECTORY'
+    conference: Optional[str] = None  # 'California Conference'
+    region: Optional[str] = None      # 'California' or 'District No. 1'
+    organization: Optional[str] = None
+    institution_name: Optional[str] = None
+    group: Optional[str] = None       # 'Officers', 'Executive Committee', etc.
+
+    def reset_section(self):
+        self.directory = None
+        self.conference = None
+        self.region = None
+        self.organization = None
+        self.institution_name = None
+        self.group = None
+
+    def reset_subheaders(self):
+        self.conference = None
+        self.region = None
+        self.organization = None
+        self.institution_name = None
+        self.group = None
+
+# ------------------------------------------------------------
+# Core parsing
+# ------------------------------------------------------------
+
+def parse_yearbook(pdf_path: str) -> Tuple[List[Dict], List[Dict]]:
+    rows: List[Dict] = []
+    errors: List[Dict] = []
+
+    ctx = Ctx(year=infer_year_from_filename(pdf_path))
+
+    with pdfplumber.open(pdf_path) as pdf:
+        for pageno, page in enumerate(pdf.pages, start=1):
+            try:
+                text = page.extract_text() or ""
+            except Exception:
+                text = ""
+            lines = clean_text_lines(text)
+
+            for raw_line in lines:
+                line = norm(raw_line)
+
+                # 1) Detect NEW DIRECTORY SECTION (top-level)
+                if looks_like_section_header(line):
+                    # If it's clearly a directory-like section, treat as new section
+                    if any(k in line.upper() for k in SECTION_KEYS):
+                        ctx.reset_section()
+                        ctx.directory = line.upper()
+                        # Often next lines are subheaders like conference/region/institution
+                        continue
+
+                # 2) Subheaders (conference/region/institution names)
+                if looks_like_subheader(line):
+                    U = line.upper()
+                    # Guess what this subheader is:
+                    # Heuristics (order matters)
+                    if "CONFERENCE" in U and len(U) < 70:
+                        ctx.conference = line.title()
+                        ctx.region = None
+                        ctx.organization = None
+                        ctx.institution_name = None
+                        ctx.group = None
+                        continue
+                    if any(w in U for w in ["PRESS", "PUBLISH", "INSTITUTION", "SANITARIUM", "COLLEGE", "SCHOOL", "INSTITUTE"]):
+                        ctx.institution_name = line.title()
+                        ctx.organization = None
+                        ctx.group = None
+                        continue
+                    if any(w in U for w in ["DISTRICT", "PROVINCE", "STATE", "TERRITORY", "MISSION"]):
+                        ctx.region = line.title()
+                        ctx.group = None
+                        continue
+                    # Fallback: treat as a region-ish grouping
+                    ctx.region = line.title()
+                    ctx.group = None
+                    continue
+
+                # 3) Group labels (not all-caps but look like 'Officers:', 'Executive Committee', etc.)
+                lower = line.lower().rstrip(":")
+                if any(tok.lower() in lower for tok in ["officers", "executive committee", "committee", "board of trustees", "directors", "publishing committee", "faculty", "teachers", "agents"]):
+                    ctx.group = line.rstrip(":")
+                    continue
+
+                # 4) Entry lines (general pattern):
+                # Try to find 'Position — Rest'
+                position, position_info, rest = extract_position(line)
+
+                # If it *starts* with role info, we’re in 'role — person, location' shape
+                if position:
+                    # Some lines contain multiple names (e.g., Exec Committee—A; B; C; City, ST)
+                    # Split on semicolons; last part might hold a shared location.
+                    parts = [p.strip() for p in re.split(r"\s*;\s*", rest) if p.strip()]
+                    # If the final part clearly looks like a location (has a comma and few words), we'll treat as shared location
+                    shared_location = ""
+                    if parts and ("," in parts[-1]) and (len(parts[-1].split()) <= 6):
+                        # This might also be 'Name, Location' though; we’ll not force it—handle per part.
+                        pass
+
+                    # Emit one row per part; parse "Name, Location" for each.
+                    for part in parts if parts else [rest]:
+                        if not part:
+                            continue
+                        name_str, loc = split_name_and_location(part)
+                        prefix, given, lastname, suffix = split_name_block(name_str)
+
+                        if not lastname and not given:
+                            # Might be a continuation line; log as error
+                            errors.append({
+                                "page": pageno,
+                                "directory": ctx.directory,
+                                "conference": ctx.conference,
+                                "region": ctx.region,
+                                "institution-name": ctx.institution_name,
+                                "group": ctx.group,
+                                "line": raw_line,
+                                "reason": "No name parsed after position"
                             })
-                    buffer_role = seg.group(1).strip()
-                    buffer_text = seg.group(2).strip()
-            else:
-                if buffer_text is not None:
-                    buffer_text += " " + line.strip()
-    if buffer_role is not None and buffer_text is not None and is_personnel_context(major):
-        for chunk in split_role_entries(buffer_text.strip()):
-            person = parse_person_chunk(chunk)
-            loc = parse_location_fields(person["location_raw"])
-            records.append({
-                "source_file": os.path.basename(path),
-                "source_year": year,
-                "section": major,
-                "organization": suborg if suborg else major,
-                "role_title": buffer_role.strip(),
-                **person, **loc
-            })
-    filtered = []
-    for r in records:
-        role = r["role_title"]
-        if any(role.startswith(p) for p in ALLOWED_ROLE_PREFIXES) and role not in DENY_ROLES:
-            if any(c.isalpha() for c in r["full_name"]):
-                filtered.append(r)
-    return filtered
+                            continue
+
+                        rows.append({
+                            "directory": ctx.directory,
+                            "conference": ctx.conference,
+                            "region": ctx.region,
+                            "institution-name": ctx.institution_name,
+                            "organization": ctx.organization,
+                            "group": ctx.group,
+                            "position-information": position_info,
+                            "position": position,
+                            "prefix": prefix,
+                            "name": given,
+                            "lastname": lastname,
+                            "suffix": suffix,
+                            "location": loc,
+                            "yearbook-year": ctx.year,
+                            "page": pageno,
+                            "raw_line": raw_line,
+                        })
+                    continue
+
+                # 5) Non-position lines may still be roster rows like 'J. H. Waggoner, Oakland, Cal.'
+                # or 'Pacific Press—Oakland, Cal.' or 'Address: ...'
+                # We first check if it looks like 'Name, Location'
+                if "," in line:
+                    name_str, loc = split_name_and_location(line)
+                    prefix, given, lastname, suffix = split_name_block(name_str)
+
+                    # If there's clearly a person's name, accept
+                    if lastname or given:
+                        rows.append({
+                            "directory": ctx.directory,
+                            "conference": ctx.conference,
+                            "region": ctx.region,
+                            "institution-name": ctx.institution_name,
+                            "organization": ctx.organization,
+                            "group": ctx.group,
+                            "position-information": None,
+                            "position": None,
+                            "prefix": prefix,
+                            "name": given,
+                            "lastname": lastname,
+                            "suffix": suffix,
+                            "location": loc,
+                            "yearbook-year": ctx.year,
+                            "page": pageno,
+                            "raw_line": raw_line,
+                        })
+                        continue
+
+                    # If not a person, treat as organization + location (e.g., 'Pacific Press, Oakland, Cal.')
+                    if not (lastname or given) and ctx.institution_name is None:
+                        # store as institution row
+                        rows.append({
+                            "directory": ctx.directory,
+                            "conference": ctx.conference,
+                            "region": ctx.region,
+                            "institution-name": name_str.title(),
+                            "organization": ctx.organization,
+                            "group": ctx.group,
+                            "position-information": None,
+                            "position": None,
+                            "prefix": None,
+                            "name": "",
+                            "lastname": "",
+                            "suffix": None,
+                            "location": loc,
+                            "yearbook-year": ctx.year,
+                            "page": pageno,
+                            "raw_line": raw_line,
+                        })
+                        continue
+
+                # 6) Continuations (wrapped locations or addenda)
+                # If previous row exists and this line looks short and address-like, append to location.
+                if rows and (len(line) <= 64) and (" " in line) and not looks_like_section_header(line) and not looks_like_subheader(line):
+                    rows[-1]["location"] = (rows[-1]["location"] + " " + line).strip()
+                    continue
+
+                # 7) Otherwise, we don't know what this is—log as unparsed
+                errors.append({
+                    "page": pageno,
+                    "directory": ctx.directory,
+                    "conference": ctx.conference,
+                    "region": ctx.region,
+                    "institution-name": ctx.institution_name,
+                    "group": ctx.group,
+                    "line": raw_line,
+                    "reason": "Unrecognized pattern",
+                })
+
+    return rows, errors
+
+# ------------------------------------------------------------
+# Output
+# ------------------------------------------------------------
+
+def align_columns(df: pd.DataFrame, template_path: Optional[str]) -> pd.DataFrame:
+    if template_path:
+        try:
+            # Use first sheet columns as template order
+            tdf = pd.read_excel(template_path, nrows=0)
+            template_cols = list(tdf.columns)
+            # ensure all template columns exist
+            for c in template_cols:
+                if c not in df.columns:
+                    df[c] = None
+            # keep extra columns at the end
+            extras = [c for c in df.columns if c not in template_cols]
+            df = df[template_cols + extras]
+            return df
+        except Exception:
+            pass  # fallback to base order if template not loadable
+
+    # no template: use base order; add any missing; append extras
+    for c in BASE_COLUMNS:
+        if c not in df.columns:
+            df[c] = None
+    ordered = BASE_COLUMNS + [c for c in df.columns if c not in BASE_COLUMNS]
+    return df[ordered]
+
+def write_excel(rows: List[Dict], errors: List[Dict], out_path: str, template_path: Optional[str]):
+    df = pd.DataFrame(rows)
+    df = align_columns(df, template_path)
+
+    # sort for consistency
+    sort_cols = [c for c in ["directory", "conference", "region", "institution-name", "group", "position", "lastname", "name"] if c in df.columns]
+    if sort_cols:
+        df = df.sort_values(sort_cols, na_position="last", kind="mergesort")
+
+    err_df = pd.DataFrame(errors) if errors else pd.DataFrame(columns=["page","directory","conference","region","institution-name","group","line","reason"])
+
+    with pd.ExcelWriter(out_path, engine="openpyxl") as xw:
+        df.to_excel(xw, index=False, sheet_name="yearbook_directory")
+        err_df.to_excel(xw, index=False, sheet_name="parse_errors")
+
+# ------------------------------------------------------------
+# CLI
+# ------------------------------------------------------------
 
 def main():
-    inputs = ["/mnt/data/YB1883.pdf", "/mnt/data/YB1921.pdf"]
-    out_path = "/mnt/data/yearbook_people.csv"
-    fieldnames = [
-        "source_file","source_year","section","organization","role_title",
-        "name_prefix","full_name","name_suffix","gender_inferred",
-        "location_raw","city","state_or_region","country"
-    ]
-    total = 0
-    with open(out_path, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=fieldnames)
-        w.writeheader()
-        for path in inputs:
-            if not os.path.exists(path):
-                print(f"WARNING: file not found: {path}")
-                continue
-            rows = parse_pdf(path)
-            for r in rows:
-                w.writerow({k: r.get(k) for k in fieldnames})
-            print(f"Parsed {len(rows)} people from {os.path.basename(path)}")
-            total += len(rows)
-    print(f"Wrote {total} rows to {out_path}")
+    ap = argparse.ArgumentParser(description="Parse ALL directories from SDA Yearbook PDF into Excel.")
+    ap.add_argument("pdf", help="Path to Yearbook PDF (e.g., YB1883.pdf)")
+    ap.add_argument("-o", "--out", default=None, help="Output .xlsx path (default: <pdf>_alldirs.xlsx)")
+    ap.add_argument("--template-xlsx", default=None, help="Optional: an Excel file whose column order to mirror (e.g., YB1884.xlsx)")
+    args = ap.parse_args()
+
+    out = args.out
+    if not out:
+        base = re.sub(r"\.pdf$", "", args.pdf, flags=re.IGNORECASE)
+        out = f"{base}_alldirs.xlsx"
+
+    rows, errors = parse_yearbook(args.pdf)
+    write_excel(rows, errors, out, args.template_xlsx)
+
+    print(f"[OK] Wrote {len(rows)} rows to: {out}")
+    if errors:
+        print(f"[NOTE] Logged {len(errors)} lines in parse_errors sheet for follow-up tuning.")
 
 if __name__ == "__main__":
+    import re
     main()
