@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Results — SDA Yearbook Analyzer</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="container">
+    <h1>Analysis Results</h1>
+    {% if errors and errors|length > 0 %}
+      <div class="flash error">
+        <b>Some files could not be processed:</b>
+        <ul>
+          {% for fname, err in errors %}
+          <li><code>{{ fname }}</code> — {{ err }}</li>
+          {% endfor %}
+        </ul>
+      </div>
+    {% endif %}
+
+   <section class="card">
+  <h2>Download CSV</h2>
+  <p>
+    <a class="button-like" href="{{ url_for('download_token', token=token) }}">
+      Download {{ csv_name }}
+    </a>
+  </p>
+</section>
+
+    </section>
+
+    <section class="card">
+      <h2>Quick Stats</h2>
+      <p><b>Total rows:</b> {{ stats.total_rows }}</p>
+      <p><b>Missing fields:</b> conference={{ stats.missing.conference }}, organization={{ stats.missing.organization }}, group={{ stats.missing.group }}</p>
+      <div class="grid">
+        <div>
+          <h3>By Year</h3>
+          <ul>
+            {% for year, cnt in stats.years %}
+            <li>{{ year }} — {{ cnt }}</li>
+            {% endfor %}
+          </ul>
+        </div>
+        <div>
+          <h3>By Conference</h3>
+          <ul>
+            {% for conf, cnt in stats.conferences %}
+            <li>{{ conf }} — {{ cnt }}</li>
+            {% endfor %}
+          </ul>
+        </div>
+      </div>
+      <p class="note">Tip: If “Conference” looks wrong for some lines, try narrowing your uploads to a single yearbook, then compare with the PDF page headings.</p>
+    </section>
+
+    <p><a href="{{ url_for('index') }}">Analyze more PDFs</a></p>
+  </div>
+</body>
+</html>
