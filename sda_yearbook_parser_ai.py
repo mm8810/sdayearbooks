@@ -1,365 +1,364 @@
-#!/usr/bin/env python3
-import argparse, os, re, json, csv, time, math, sys
+
+# sda_yearbook_parser_ai.py
+import argparse, os, re, json, csv, time, math, sys, tempfile, hashlib
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
 from dataclasses import dataclass, asdict, field
-
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-from dateutil.parser import parse as dtparse
+from dotenv import load_dotenv
 
-# --- PDF extraction ---
+# Load environment variables from .env
+load_dotenv()
+
+# PDF (we keep ability to read raw PDF if no prefiltered text provided)
 try:
     from PyPDF2 import PdfReader
-except Exception as e:
-    print("Please `pip install PyPDF2`", file=sys.stderr)
-    raise
-
-# --- LLM providers ---
-# Optional; install whichever you plan to use
-try:
-    import anthropic  # Claude
 except Exception:
-    anthropic = None
+    PdfReader = None
 
+# Rate limiter
+from rate_limiter import TokenBucket, estimate_tokens_from_text
+
+# Optional providers
+OpenAI = None
+anthropic = None
 try:
-    from openai import OpenAI  # OpenAI
+    from openai import OpenAI as _OpenAI
+    OpenAI = _OpenAI
 except Exception:
-    OpenAI = None
-
-# --- Validation ---
-from pydantic import BaseModel, Field, ValidationError
-
-# -----------------------------
-# Schema you requested (column order preserved in CSV)
-# -----------------------------
-CSV_COLUMNS = [
-    "Conference",
-    "Gender",
-    "Group",
-    "Institution-Name",
-    "Last-Name",
-    "Location",
-    "Name",
-    "Organization",
-    "Page",
-    "Position",
-    "Position-Information",
-    "Prefix",
-    "Region",
-    "Suffix",
-    "Yearbook",
-]
-
-class RowModel(BaseModel):
-    Conference: Optional[str] = None
-    Gender: Optional[str] = None
-    Group: Optional[str] = None
-    Institution_Name: Optional[str] = Field(None, alias="Institution-Name")
-    Last_Name: Optional[str] = Field(..., alias="Last-Name")
-    Location: Optional[str] = None
-    Name: Optional[str] = Field(..., alias="Name")
-    Organization: Optional[str] = None
-    Page: int
-    Position: Optional[str] = None
-    Position_Information: Optional[str] = Field(None, alias="Position-Information")
-    Prefix: Optional[str] = None
-    Region: Optional[str] = None
-    Suffix: Optional[str] = None
-    Yearbook: int
-
-    class Config:
-        populate_by_name = True
-
-
-# -----------------------------
-# Prompt Template
-# -----------------------------
-PROMPT_TEMPLATE = """You are a meticulous historian-assistant extracting structured records from a historical yearbook page.
-
-Return ONLY a JSON object with this exact shape and keys:
-
-{{
-  "rows": [
-    {{
-      "Conference": null | string,
-      "Gender": null | "Male" | "Female" | "Unknown",
-      "Group": null | string,
-      "Institution-Name": null | string,
-      "Last-Name": string,                # REQUIRED
-      "Location": null | string,
-      "Name": string,                     # REQUIRED, as printed (e.g., "J. H. Kellogg")
-      "Organization": null | string,
-      "Page": INTEGER,                    # REQUIRED
-      "Position": null | string,          # e.g., President, Secretary, Treasurer, etc.
-      "Position-Information": null | string, # free-form details after the title
-      "Prefix": null | string,            # e.g., Eld., Dr., Mrs., Mr., Miss
-      "Region": null | string,
-      "Suffix": null | string,            # e.g., Jr., Sr., M.D., Ph.D., Esq.
-      "Yearbook": INTEGER                 # REQUIRED (supplied in system context)
-    }},
-    ...
-  ]
-}}
-
-Extraction rules:
-- Parse *names and titles/roles* mentioned on the page. Ignore doctrinal text or narrative paragraphs.
-- If a line lists an *organization directory* (e.g., “GENERAL SABBATH-SCHOOL ASSOCIATION DIRECTORY”), set Organization to that text; Position to the role (President, etc).
-- If a *state conference* or *association* is indicated (e.g., “MAINE.”, “STATE CONFERENCE DIRECTORIES”), set Region (state/territory/country) and/or Conference (named conference). Use Group for sub-bodies (e.g., “Camp-Meeting Committee”).
-- Prefix examples: Eld., Dr., Mrs., Mr., Miss; Suffix examples: Jr., Sr., M.D.
-- Derive Gender conservatively from honorifics (e.g., Mrs./Miss → Female; Eld./Mr. → Male; otherwise “Unknown”).
-- Last-Name is the surname (strip punctuation). “Name” is the full printed name including initials.
-- Position-Information: anything immediately following the title that carries details (e.g., addresses).
-- Location: city/state/country as printed on the line, if present.
-- Keep diacritics; don’t modernize spellings.
-- If the page has no valid entries, return {{"rows":[]}}.
-
-Return ONLY JSON. No markdown, no commentary.
-
-YEARBOOK YEAR: {year}
-PAGE NUMBER: {page}
-
-PAGE TEXT:
----
-{page_text}
----
-"""
-
-# -----------------------------
-# Provider Adapters
-# -----------------------------
-class ProviderError(Exception):
+    pass
+try:
+    import anthropic as _anthropic
+    anthropic = _anthropic
+except Exception:
     pass
 
-class ProviderBase:
-    def __init__(self, model: str):
-        self.model = model
+# -----------------------------
+# Data model (kept simple)
+# -----------------------------
+@dataclass
+class Row:
+    yearbook_year: Optional[int] = None
+    page: Optional[int] = None
+    name: Optional[str] = None
+    last_name: Optional[str] = None
+    prefix: Optional[str] = None
+    suffix: Optional[str] = None
+    gender: Optional[str] = None
+    position: Optional[str] = None
+    position_information: Optional[str] = None
+    organization: Optional[str] = None
+    group: Optional[str] = None
+    conference: Optional[str] = None
+    institution_name: Optional[str] = None
+    location: Optional[str] = None
+    region: Optional[str] = None
 
-    def complete(self, prompt: str) -> str:
+# -----------------------------
+# Provider skeleton + limits
+# -----------------------------
+class ProviderError(RuntimeError): ...
+class ProviderBase:
+    def __init__(self, model: str, limiter: TokenBucket):
+        self.model = model
+        self.limiter = limiter
+    def complete(self, system_prompt: str, user_text: str, max_output_tokens: int = 400) -> str:
         raise NotImplementedError
 
-class AnthropicProvider(ProviderBase):
-    def __init__(self, model: str):
-        super().__init__(model)
-        if anthropic is None:
-            raise ProviderError("anthropic package not installed. `pip install anthropic`")
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
-        if not api_key:
-            raise ProviderError("ANTHROPIC_API_KEY not set")
-        self.client = anthropic.Anthropic(api_key=api_key)
-
-    @retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1.0, min=1, max=30),
-           retry=retry_if_exception_type(Exception))
-    def complete(self, prompt: str) -> str:
-        msg = self.client.messages.create(
-            model=self.model,
-            max_tokens=2000,
-            temperature=0,
-            messages=[
-                {"role": "user", "content": prompt}
-            ]
-        )
-        # Anthropic returns a list of content blocks; join text parts
-        parts = []
-        for block in msg.content:
-            if block.type == "text":
-                parts.append(block.text)
-        return "".join(parts).strip()
 
 class OpenAIProvider(ProviderBase):
-    def __init__(self, model: str):
-        super().__init__(model)
+    def __init__(self, model: str, limiter: TokenBucket):
+        super().__init__(model, limiter)
         if OpenAI is None:
             raise ProviderError("openai package not installed. `pip install openai`")
-        api_key = os.environ.get("OPENAI_API_KEY")
+        api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise ProviderError("OPENAI_API_KEY not set")
         self.client = OpenAI(api_key=api_key)
 
-    @retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1.0, min=1, max=30),
-           retry=retry_if_exception_type(Exception))
-    def complete(self, prompt: str) -> str:
-        # Use simple text completion; ask for raw JSON
-        resp = self.client.chat.completions.create(
-            model=self.model,
-            temperature=0,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        return resp.choices[0].message.content.strip()
-
-
-# -----------------------------
-# Utilities
-# -----------------------------
-def infer_year_from_name(pdf_path: Path) -> Optional[int]:
-    m = re.search(r'(18|19|20)\d{2}', pdf_path.stem)
-    return int(m.group(0)) if m else None
-
-def clean_text(t: str) -> str:
-    # Normalize spaces and common hyphenation breaks
-    t = t.replace("\r", "\n")
-    t = re.sub(r"[ \t]+", " ", t)
-    t = re.sub(r"\n{3,}", "\n\n", t)  # collapse huge gaps
-    # Unwrap common hyphen-breaks like "Associa-\ntion"
-    t = re.sub(r"(\w)-\n(\w)", r"\1\2", t)
-    return t.strip()
-
-def extract_pdf_text_per_page(pdf_path: Path) -> List[str]:
-    reader = PdfReader(str(pdf_path))
-    pages = []
-    for i, page in enumerate(reader.pages):
+    @retry(stop=stop_after_attempt(6), wait=wait_exponential(multiplier=1, min=1, max=20), retry=retry_if_exception_type(Exception))
+    def complete(self, system_prompt: str, user_text: str, max_output_tokens: int = 400) -> str:
+        total_est = estimate_tokens_from_text(system_prompt) + estimate_tokens_from_text(user_text) + max_output_tokens
+        self.limiter.acquire(total_est)
         try:
-            txt = page.extract_text() or ""
+            resp = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role":"system","content":system_prompt},
+                    {"role":"user","content":user_text}
+                ],
+                temperature=0,
+                max_tokens=max_output_tokens,
+            )
+        except Exception as e:
+            # Let tenacity handle retries for rate/timeouts/5xx
+            raise
+        try:
+            return resp.choices[0].message.content if resp and resp.choices else ""
         except Exception:
-            txt = ""
-        pages.append(clean_text(txt))
-    return pages
+            return ""
 
-def json_only(s: str) -> str:
-    # Try to isolate a top-level JSON object
-    start = s.find("{")
-    end = s.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        return s[start:end+1]
-    return s
+class AnthropicProvider(ProviderBase):
+    def __init__(self, model: str, limiter: TokenBucket):
+        super().__init__(model, limiter)
+        if anthropic is None:
+            raise ProviderError("anthropic package not installed. `pip install anthropic`")
+        api_key = os.getenv("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise ProviderError("ANTHROPIC_API_KEY not set")
+        self.client = anthropic.Anthropic(api_key=api_key)
 
-def coerce_rows_to_schema(rows: List[Dict[str, Any]], year: int, page: int) -> List[Dict[str, Any]]:
-    fixed = []
-    for r in rows:
-        # Normalize keys the model might return
-        r = {k.replace("_", "-"): v for k, v in r.items()}
-        # Force requireds and types
-        r.setdefault("Yearbook", year)
-        r.setdefault("Page", page)
+    @retry(stop=stop_after_attempt(6), wait=wait_exponential(multiplier=1, min=1, max=20), retry=retry_if_exception_type(Exception))
+    def complete(self, system_prompt: str, user_text: str, max_output_tokens: int = 400) -> str:
+        total_est = estimate_tokens_from_text(system_prompt) + estimate_tokens_from_text(user_text) + max_output_tokens
+        self.limiter.acquire(total_est)
         try:
-            obj = RowModel.model_validate(r)
-        except ValidationError:
-            # attempt soft fixes for common fields
-            r["Page"] = page
-            r["Yearbook"] = year
-            if not r.get("Last-Name") and r.get("Name"):
-                # naive guess: last token (strip punctuation)
-                lname = re.sub(r"[^\w’'-]", "", r["Name"].split()[-1])
-                r["Last-Name"] = lname
-            # retry validation once
-            obj = RowModel.model_validate(r)
-        # Convert back to your exact column names (aliases preserved)
-        out = obj.model_dump(by_alias=True)
-        # Ensure all CSV columns are present
-        for c in CSV_COLUMNS:
-            out.setdefault(c, None)
-        fixed.append(out)
-    return fixed
+            resp = self.client.messages.create(
+                model=self.model,
+                system=system_prompt,
+                messages=[{"role":"user","content":user_text}],
+                temperature=0,
+                max_tokens=max_output_tokens,
+            )
+        except Exception as e:
+            raise
+        try:
+            # anthropic returns a list of content blocks
+            parts = []
+            for block in resp.content or []:
+                if getattr(block, "type", "") == "text":
+                    parts.append(block.text)
+            return "".join(parts).strip()
+        except Exception:
+            return ""
 
+MODEL_LIMITS = {
+    # OpenAI
+    "gpt-5":       {"TPM": 500_000, "RPM": 500},
+    "gpt-5-mini":  {"TPM": 500_000, "RPM": 500},
+    "gpt-4.1":     {"TPM": 30_000,  "RPM": 500},
+    # Anthropic (adjust if your account differs)
+    "claude-3-5-sonnet": {"TPM": 500_000, "RPM": 400},
+    "claude-3-haiku":    {"TPM": 500_000, "RPM": 400},
+}
 
-# -----------------------------
+def pick_limits(model: str):
+    return MODEL_LIMITS.get(model, {"TPM": 30_000, "RPM": 60})
+
+# --------------
+# Prompt pieces
+# --------------
+SYSTEM_PROMPT = """You are extracting structured directory entries from scanned historical Seventh-day Adventist Yearbooks (1880s–1910s). These contain directories of people, offices, and institutions across conferences, missions, schools, publishing associations, etc.
+Output strict JSON Lines, one object per line. Each line represents one person entry (individual name with role information).
+Keys (all required; use null for missing):
+yearbook_year (int | null)
+page (int | null)
+name (string)
+last_name (string | null)
+prefix (string | null)
+suffix (string | null)
+gender (string | null)
+position (string | null)
+position_information (string | null)
+organization (string | null)
+group (string | null)
+conference (string | null)
+institution_name (string | null)
+location (string | null)
+region (string | null)
+Parsing Rules:
+Each object = one identifiable person. Exclude section headings, non-person institutional names, tables, or filler text.
+Name Parsing:
+name: Full name exactly as printed (preserve initials and punctuation).
+Split out last_name (best guess from rightmost capitalized surname).
+Prefixes (Eld., Mrs., Dr., Miss, Prof., etc.) and suffixes (Jr., Sr., M.D., etc.) go in their fields.
+Derive gender heuristically from prefix (Miss, Mrs. → female; Eld., Mr. → male).
+Position Parsing:
+Capture person’s official title or role (e.g., President, Secretary, Treasurer, Director, Committee Member).
+If followed by a colon or semicolon, take the text before colon as position; text after colon as position_information (e.g., “Battle Creek, Mich.”).
+Organizational Hierarchy:
+Assign the nearest organization heading (e.g., General Conference Directory, Health Reform Institute Directory, Michigan Conference) to organization.
+Assign the next higher heading (e.g., STATE CONFERENCE DIRECTORIES) to group.
+If a larger territorial or denominational label exists (e.g., North Pacific Conference, Scandinavian Union), assign that to conference.
+Institution and Location:
+If a school, sanitarium, or publishing house is named, fill in institution_name.
+Extract city, state, or country to location (normalize to “City, State” if both present).
+For colonial-era or non-US entities, include broader label (e.g., “South Lancaster, Mass.”, “Battle Creek, Mich.”, “Christiana, Norway”).
+Region:
+Use broader geopolitical or denominational grouping (e.g., “United States”, “Scandinavia”, “Africa”, “South America”, etc.) if discernible from headings.
+Conferences:
+Always populate this with the territorial heading (state, country, or mission).
+Examples: “MICHIGAN,” “DENMARK,” “NORTH PACIFIC,” “GERMAN UNION CONFERENCE.”
+If none is explicit, inherit from the previous conference heading or the global context (e.g., “General Conference” or “International Mission”).
+Do not ever set conference to “Page,” “Directory,” or anything that is not a territory or conference.
+Contextual Propagation:
+When multiple people are listed under one heading, inherit the same conference / organization / location until a new section heading appears.
+Reset on new section headings.
+Formatting Requirements:
+Output one JSON object per line (JSONL).
+Strict JSON — double quotes around keys and values.
+No trailing commas or markdown formatting.
+Examples of valid entries:
+{"yearbook_year":1883,"page":7,"name":"Geo. I. Butler","last_name":"Butler","prefix":null,"suffix":null,"gender":"male","position":"President","position_information":null,"organization":"General Conference","group":null,"conference":null,"institution_name":null,"location":"Battle Creek, Mich.","region":"United States"}
+{"yearbook_year":1883,"page":12,"name":"S. N. Haskell","last_name":"Haskell","prefix":null,"suffix":null,"gender":"male","position":"President","position_information":null,"organization":"Pacific S.D.A. Publishing Association","group":"Publishing Association Directories","conference":"California","institution_name":null,"location":"South Lancaster, Mass.","region":"United States"}
+{"yearbook_year":1904,"page":11,"name":"A. G. Daniells","last_name":"Daniells","prefix":null,"suffix":null,"gender":"male","position":"President","position_information":null,"organization":"General Conference","group":null,"conference":null,"institution_name":null,"location":"Washington, D.C.","region":"United States"}
+{"yearbook_year":1904,"page":15,"name":"W. W. Prescott","last_name":"Prescott","prefix":null,"suffix":null,"gender":"male","position":"Second Vice-President","position_information":null,"organization":"General Conference","group":null,"conference":null,"institution_name":null,"location":"Washington, D.C.","region":"United States"}
+{"yearbook_year":1904,"page":27,"name":"S. Fulton","last_name":"Fulton","prefix":null,"suffix":null,"gender":"male","position":"President","position_information":null,"organization":"Tennessee Conference","group":"State Conference Directories","conference":"Tennessee","institution_name":null,"location":"Nashville, Tenn.","region":"United States"}
+"""
+
+def build_user_prompt(page_text: str, page_index: Optional[int], year: Optional[int]) -> str:
+    # Trim noisy whitespace and long runs
+    text = re.sub(r"[ \t]+", " ", page_text or "").strip()
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    # Keep prompt compact
+    head = f"YEAR: {year if year is not None else 'unknown'}\nPAGE_INDEX: {page_index if page_index is not None else 'unknown'}"
+    return head + "\n--- PAGE TEXT ---\n" + text[:6000]  # hard cap text
+
+# --------------
+# Cache helpers
+# --------------
+CACHE_DIR = Path(tempfile.gettempdir()) / "sda_ai_cache"
+CACHE_DIR.mkdir(exist_ok=True)
+
+def cache_key(provider: str, model: str, system_prompt: str, user_prompt: str) -> Path:
+    h = hashlib.sha256()
+    h.update((provider or "").encode())
+    h.update((model or "").encode())
+    h.update(system_prompt.encode())
+    h.update(user_prompt.encode())
+    return CACHE_DIR / (h.hexdigest() + ".jsonl")
+
+def cached_complete(provider: str, model: str, call_fn, system_prompt: str, user_prompt: str) -> str:
+    key_path = cache_key(provider, model, system_prompt, user_prompt)
+    if key_path.exists():
+        try:
+            return key_path.read_text(encoding="utf-8")
+        except Exception:
+            pass
+    out = call_fn()
+    # store plain text
+    try:
+        key_path.write_text(out, encoding="utf-8")
+    except Exception:
+        pass
+    return out
+
+# --------------
 # Core runner
-# -----------------------------
-def run(pdf: Path, provider_name: str, model: str, out_csv: Path, year: Optional[int], start: int, end: Optional[int], max_pages: Optional[int]):
-    # Provider
-    if provider_name.lower() == "anthropic":
-        provider = AnthropicProvider(model)
-    elif provider_name.lower() == "openai":
-        provider = OpenAIProvider(model)
+# --------------
+def run(pdf: Path,
+        provider_name: str,
+        model: str,
+        out_csv: Path,
+        year: Optional[int] = None,
+        start: Optional[int] = None,
+        end: Optional[int] = None,
+        max_pages: Optional[int] = None,
+        prefiltered_text_path: Optional[Path] = None) -> List[Row]:
+
+    caps = pick_limits(model)
+    limiter = TokenBucket(tokens_per_min=caps["TPM"], requests_per_min=caps["RPM"])
+
+    provider_name = (provider_name or "").lower()
+    if provider_name == "anthropic":
+        provider = AnthropicProvider(model, limiter)
+    elif provider_name == "openai":
+        provider = OpenAIProvider(model, limiter)
     else:
         raise ProviderError("Unknown provider: choose 'anthropic' or 'openai'")
 
-    # Pages
-    pages = extract_pdf_text_per_page(pdf)
-    if end is None:
-        end = len(pages)
-    page_indices = list(range(max(1, start), min(end, len(pages)) + 1))
-    if max_pages:
-        page_indices = page_indices[:max_pages]
-
-    # Year
-    inferred = infer_year_from_name(pdf)
-    yearbook_year = year or inferred
-    if not yearbook_year:
-        raise ValueError("Could not infer year from filename. Pass --year explicitly.")
-
-    all_rows: List[Dict[str, Any]] = []
-
-    for page_num in page_indices:
-        text = pages[page_num - 1]
-        if not text.strip():
-            continue  # skip blank
-
-        prompt = PROMPT_TEMPLATE.format(
-            year=yearbook_year,
-            page=page_num,
-            page_text=text[:12000]  # keep context reasonably sized
-        )
-
-        try:
-            raw = provider.complete(prompt)
-        except Exception as e:
-            print(f"[warn] provider error on page {page_num}: {e}", file=sys.stderr)
-            continue
-
-        raw_json = json_only(raw)
-
-        # Try parse; if malformed, ask the model once to repair
-        parsed: Dict[str, Any]
-        try:
-            parsed = json.loads(raw_json)
-        except Exception:
-            # Repair prompt
-            repair_prompt = f"""The following is malformed JSON. Return a corrected JSON with the same keys and structure, and nothing else:"""
-
+    # Load text pages (either from prefilter file or raw PDF)
+    pages: List[Tuple[int, str]] = []
+    if prefiltered_text_path and Path(prefiltered_text_path).exists():
+        # File format: "==== PAGE i ====" lines
+        raw = Path(prefiltered_text_path).read_text(encoding="utf-8", errors="ignore")
+        buf = []
+        idx = None
+        for line in raw.splitlines():
+            m = re.match(r"^==== PAGE\s+(\d+)\s+====\s*$", line.strip())
+            if m:
+                if idx is not None and buf:
+                    pages.append((idx, "\n".join(buf).strip()))
+                idx = int(m.group(1))
+                buf = []
+            else:
+                buf.append(line)
+        if idx is not None and buf:
+            pages.append((idx, "\n".join(buf).strip()))
+    else:
+        if PdfReader is None:
+            raise RuntimeError("PyPDF2 not installed and no prefiltered text provided.")
+        reader = PdfReader(str(pdf))
+        total = len(reader.pages)
+        s = start or 0
+        e = min(end if end is not None else total, total)
+        for i in range(s, e):
             try:
-                repaired = provider.complete(repair_prompt)
-                parsed = json.loads(json_only(repaired))
-            except Exception as e:
-                print(f"[warn] JSON repair failed on page {page_num}: {e}", file=sys.stderr)
+                text = reader.pages[i].extract_text() or ""
+            except Exception:
+                text = ""
+            pages.append((i, text))
+
+    # Cap pages if requested
+    if max_pages is not None:
+        pages = pages[:max_pages]
+
+    rows: List[Row] = []
+
+    # Process pages with concurrency bound by environment
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    max_workers = int(os.environ.get("AI_MAX_INFLIGHT", "6"))
+
+    def process_one(item: Tuple[int, str]) -> List[Row]:
+        i, txt = item
+        user_prompt = build_user_prompt(txt, i, year)
+        def caller():
+            return provider.complete(SYSTEM_PROMPT, user_prompt, max_output_tokens=400)
+        result_text = cached_complete(provider_name, model, caller, SYSTEM_PROMPT, user_prompt)
+        out_rows: List[Row] = []
+        for line in result_text.splitlines():
+            try:
+                obj = json.loads(line)
+                out_rows.append(Row(**obj))
+            except Exception:
+                # Skip malformed lines
+                continue
+        return out_rows
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [pool.submit(process_one, item) for item in pages]
+        for fut in as_completed(futures):
+            try:
+                rows.extend(fut.result())
+            except Exception:
                 continue
 
-        rows = parsed.get("rows", [])
-        if not isinstance(rows, list):
-            print(f"[warn] Page {page_num}: 'rows' is not a list; skipping.", file=sys.stderr)
-            continue
-
-        fixed_rows = coerce_rows_to_schema(rows, yearbook_year, page_num)
-        all_rows.extend(fixed_rows)
-
-        # Polite pacing to reduce rate limiting
-        time.sleep(0.3)
-
     # Write CSV
+    fieldnames = [f.name for f in Row.__dataclass_fields__.values()]
     out_csv.parent.mkdir(parents=True, exist_ok=True)
-    with out_csv.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
-        writer.writeheader()
-        for r in all_rows:
-            writer.writerow({k: r.get(k) for k in CSV_COLUMNS})
+    with open(out_csv, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        for r in rows:
+            w.writerow(asdict(r))
 
-    print(f"Wrote {len(all_rows)} rows → {out_csv}")
+    return rows
 
-
-# -----------------------------
-# CLI
-# -----------------------------
 def main():
-    p = argparse.ArgumentParser(description="Extract structured rows from SDA yearbooks using Claude or OpenAI.")
-    p.add_argument("pdf", type=Path, help="Path to the yearbook PDF")
-    p.add_argument("--provider", default="anthropic", choices=["anthropic", "openai"], help="LLM provider")
-    p.add_argument("--model", default="claude-3-5-sonnet-20240620", help="Model name (e.g., claude-3-5-sonnet-20240620 or gpt-4o-mini)")
-    p.add_argument("--out", type=Path, default=Path("yearbook_rows.csv"), help="Output CSV path")
-    p.add_argument("--year", type=int, help="Yearbook year (overrides filename inference)")
-    p.add_argument("--start", type=int, default=1, help="Start page (1-based)")
-    p.add_argument("--end", type=int, help="End page (inclusive, 1-based)")
-    p.add_argument("--max-pages", type=int, help="Process at most N pages (from the start bound)")
-    args = p.parse_args()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--pdf", required=True, type=Path)
+    ap.add_argument("--provider", choices=["openai", "anthropic"], required=True)
+    ap.add_argument("--model", required=True)
+    ap.add_argument("--out", required=True, type=Path)
+    ap.add_argument("--year", type=int, default=None)
+    ap.add_argument("--start", type=int, default=None)
+    ap.add_argument("--end", type=int, default=None)
+    ap.add_argument("--max-pages", type=int, default=None)
+    ap.add_argument("--prefiltered-text", type=Path, default=None)
+    args = ap.parse_args()
 
-    run(
-        pdf=args.pdf,
-        provider_name=args.provider,
-        model=args.model,
-        out_csv=args.out,
-        year=args.year,
-        start=args.start,
-        end=args.end,
-        max_pages=args.max_pages
-    )
+    run(args.pdf, args.provider, args.model, args.out, args.year, args.start, args.end, args.max_pages, args.prefiltered_text)
 
 if __name__ == "__main__":
     main()
+

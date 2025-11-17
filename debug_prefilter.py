@@ -96,7 +96,7 @@ def create_app():
             "PDF: <input type='file' name='file' /><br/>"
             "Engine: <select name='engine'><option>rules</option><option selected>ai</option></select><br/>"
             "Provider: <select name='provider'><option>openai</option><option>anthropic</option></select><br/>"
-            "Model: <input name='model' value='gpt-4.1' /><br/>"
+            "Model: <input name='model' value='gpt-5-mini' /><br/>"
             "Year (optional): <input name='year' /><br/>"
             "<button type='submit'>Analyze</button></form>"
         )
@@ -118,7 +118,7 @@ def create_app():
 
         engine = (request.form.get("engine") or "ai").strip().lower()
         provider = (request.form.get("provider") or "openai").strip().lower()
-        model = (request.form.get("model") or "gpt-4.1").strip()
+        model = (request.form.get("model") or "gpt-5-mini").strip()
         year = request.form.get("year")
         year = int(year) if year and year.isdigit() else guess_year_from_filename(filename)
 
@@ -136,16 +136,40 @@ def create_app():
             with open(out_csv, "wb") as f:
                 f.write(csv_bytes)
         else:
-            # AI path: prefilter aggressively to reduce tokens
+            # AI path: FIXED - increased context window from 0 to 3
+            print(f"🔍 DEBUG: Starting AI analysis of {pdf_path}")
             pages = prefilter_pdf_for_ai(pdf_path, context_window=3)
+            print(f"🔍 DEBUG: Prefilter found {len(pages)} pages")
+            
             max_pages = int(os.environ.get("AI_MAX_PAGES", "40"))
             pages = pages[:max_pages]
+            print(f"🔍 DEBUG: Processing {len(pages)} pages (limited by AI_MAX_PAGES)")
+
+            # Debug: show what we found
+            if not pages:
+                print("❌ DEBUG: NO PAGES survived prefiltering! This is the problem.")
+                print("💡 SUGGESTION: Try running debug_prefilter.py on your PDF")
+            else:
+                for i, (page_num, content) in enumerate(pages[:3]):  # Show first 3 pages
+                    print(f"🔍 DEBUG: Page {page_num} has {len(content)} characters")
+                    print(f"🔍 DEBUG: First 100 chars: {repr(content[:100])}")
 
             # Write prefiltered text bundle for the AI runner
             pre_txt = os.path.join(tmpdir, f"ai_pages_{token}.txt")
             with open(pre_txt, "w", encoding="utf-8") as f:
                 for i, txt in pages:
                     f.write(f"\n\n==== PAGE {i} ====\n{(txt or '').strip()}\n")
+            
+            print(f"🔍 DEBUG: Wrote prefiltered text to {pre_txt}")
+            
+            # Check if prefiltered file has content
+            if os.path.exists(pre_txt):
+                with open(pre_txt, 'r') as f:
+                    content = f.read()
+                print(f"🔍 DEBUG: Prefiltered file has {len(content)} characters")
+                if len(content) < 100:
+                    print(f"⚠️  WARNING: Very little content in prefiltered file!")
+                    print(f"Content: {repr(content[:200])}")
 
             pai.run(
                 pdf=Path(pdf_path),
@@ -164,15 +188,24 @@ def create_app():
             try:
                 df = pd.read_csv(out_csv)
                 rows_dicts = df.fillna("").to_dict(orient="records")
-            except Exception:
+                print(f"🔍 DEBUG: Final CSV has {len(rows_dicts)} rows")
+            except Exception as e:
+                print(f"❌ DEBUG: Error reading final CSV: {e}")
                 rows_dicts = []
 
         info = summarize(rows_dicts if engine != "rules" else rows_dicts)
         dl_url = url_for("download_token", token=token)
+        
+        # Enhanced result display with debug info
+        debug_info = ""
+        if engine == "ai":
+            debug_info = f"<br/>Debug: {len(pages)} pages processed, prefiltered file: {pre_txt}"
+        
         html = (
             f"<p><b>Done.</b> Rows: {info['total_rows']}. "
             f"<a href='{dl_url}'>Download CSV</a></p>"
             f"<pre>Top conferences (sample): {info['top_conferences']}</pre>"
+            f"{debug_info}"
         )
         return html
 
@@ -191,8 +224,3 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5050"))
     app = create_app()
     app.run(host="127.0.0.1", port=port, debug=True)
-
-
-
-
-

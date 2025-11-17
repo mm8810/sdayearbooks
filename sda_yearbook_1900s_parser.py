@@ -5,11 +5,7 @@ import glob
 from dataclasses import dataclass, asdict
 from typing import List, Tuple, Optional
 from pathlib import Path
-
-try:
-    import PyPDF2
-except Exception as e:
-    PyPDF2 = None
+import PyPDF2
 
 @dataclass
 class Row:
@@ -76,8 +72,6 @@ MEMBER_SECTION_HEADERS = [
 ]
 
 def read_pdf_text(pdf_path: str) -> List[Tuple[int, str]]:
-    if PyPDF2 is None:
-        raise RuntimeError("PyPDF2 is required but not available.")
     reader = PyPDF2.PdfReader(pdf_path)
     pages = []
     for i, page in enumerate(reader.pages):

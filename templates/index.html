@@ -23,6 +23,42 @@
       <label for="files">Choose PDF files</label>
       <input type="file" id="files" name="files" accept="application/pdf" multiple>
       <button type="submit">Analyze PDFs</button>
+      <div class="card" style="margin-top:12px">
+  <h3>Extraction engine</h3>
+  <label style="display:block;margin:6px 0;">
+    <input type="radio" name="engine" value="rule" checked>
+    Rule-based (auto-detect 1800s vs 1900s)
+  </label>
+  <label style="display:block;margin:6px 0;">
+    <input type="radio" name="engine" value="ai">
+    AI-assisted (requires API key)
+  </label>
+
+  <div id="ai-options" style="display:none; margin-top:8px;">
+    <label>Provider
+      <select name="provider">
+        <option value="openai" selected>OpenAI</option>
+        <option value="anthropic">Anthropic</option>
+      </select>
+    </label>
+    <label style="display:block;margin-top:6px;">Model
+      <input type="text" name="model" value="gpt-4o-mini" />
+    </label>
+    <label style="display:block;margin-top:6px;">Max pages (optional)
+      <input type="number" min="1" name="max_pages" placeholder="e.g., 20" />
+    </label>
+    <p class="note">Set <code>OPENAI_API_KEY</code> or <code>ANTHROPIC_API_KEY</code> in your environment.</p>
+  </div>
+</div>
+
+<script>
+  const radios = document.querySelectorAll('input[name="engine"]');
+  const aio = document.getElementById('ai-options');
+  radios.forEach(r => r.addEventListener('change', () => {
+    aio.style.display = (document.querySelector('input[name="engine"]:checked').value === 'ai') ? 'block' : 'none';
+  }));
+</script>
+
     </form>
 
     <details class="help">

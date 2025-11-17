@@ -35,6 +35,11 @@
       <h2>Quick Stats</h2>
       <p><b>Total rows:</b> {{ stats.total_rows }}</p>
       <p><b>Missing fields:</b> conference={{ stats.missing.conference }}, organization={{ stats.missing.organization }}, group={{ stats.missing.group }}</p>
+      <p class="note">
+  Engine: {{ engine }}
+  {% if engine == 'ai' %} ({{ provider }} / {{ model }}){% endif %}
+</p>
+
       <div class="grid">
         <div>
           <h3>By Year</h3>
