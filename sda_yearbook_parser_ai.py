@@ -149,7 +149,9 @@ def pick_limits(model: str):
 # Prompt pieces
 # --------------
 SYSTEM_PROMPT = """You are extracting structured directory entries from scanned historical Seventh-day Adventist Yearbooks (1880s–1910s). These contain directories of people, offices, and institutions across conferences, missions, schools, publishing associations, etc.
+
 Output strict JSON Lines, one object per line. Each line represents one person entry (individual name with role information).
+
 Keys (all required; use null for missing):
 yearbook_year (int | null)
 page (int | null)
@@ -162,49 +164,67 @@ position (string | null)
 position_information (string | null)
 organization (string | null)
 group (string | null)
-conference (string | null)
+conference (string) -- REQUIRED, NEVER NULL
 institution_name (string | null)
 location (string | null)
 region (string | null)
+
 Parsing Rules:
 Each object = one identifiable person. Exclude section headings, non-person institutional names, tables, or filler text.
+
 Name Parsing:
 name: Full name exactly as printed (preserve initials and punctuation).
 Split out last_name (best guess from rightmost capitalized surname).
 Prefixes (Eld., Mrs., Dr., Miss, Prof., etc.) and suffixes (Jr., Sr., M.D., etc.) go in their fields.
 Derive gender heuristically from prefix (Miss, Mrs. → female; Eld., Mr. → male).
+
 Position Parsing:
-Capture person’s official title or role (e.g., President, Secretary, Treasurer, Director, Committee Member).
-If followed by a colon or semicolon, take the text before colon as position; text after colon as position_information (e.g., “Battle Creek, Mich.”).
+Capture person's official title or role (e.g., President, Secretary, Treasurer, Director, Committee Member).
+If followed by a colon or semicolon, take the text before colon as position; text after colon as position_information (e.g., "Battle Creek, Mich.").
+
 Organizational Hierarchy:
 Assign the nearest organization heading (e.g., General Conference Directory, Health Reform Institute Directory, Michigan Conference) to organization.
 Assign the next higher heading (e.g., STATE CONFERENCE DIRECTORIES) to group.
-If a larger territorial or denominational label exists (e.g., North Pacific Conference, Scandinavian Union), assign that to conference.
+
+Conference Assignment (CRITICAL - ALWAYS REQUIRED):
+EVERY person MUST have a conference value. Follow this hierarchy:
+1. If under a state/territory conference heading (e.g., "Michigan Conference", "California Conference"), use that state/territory name
+2. If under a union conference heading (e.g., "German Union Conference", "Scandinavian Union"), use that union name
+3. If under a mission heading (e.g., "South African Mission", "India Mission"), use that mission name
+4. If under General Conference with no specific territory, use "General Conference"
+5. If unclear but within a regional section, use the regional identifier
+6. As last resort for truly ambiguous cases, use "General Conference" as the default
+
+Conference format:
+- State conferences: Use state name (e.g., "Michigan", "California", "Tennessee")
+- Union conferences: Keep full name (e.g., "German Union", "Scandinavian Union", "North Pacific Union")
+- Mission fields: Keep full name (e.g., "South African Mission", "India Mission")
+- General body: "General Conference"
+
 Institution and Location:
 If a school, sanitarium, or publishing house is named, fill in institution_name.
-Extract city, state, or country to location (normalize to “City, State” if both present).
-For colonial-era or non-US entities, include broader label (e.g., “South Lancaster, Mass.”, “Battle Creek, Mich.”, “Christiana, Norway”).
+Extract city, state, or country to location (normalize to "City, State" if both present).
+For colonial-era or non-US entities, include broader label (e.g., "South Lancaster, Mass.", "Battle Creek, Mich.", "Christiana, Norway").
+
 Region:
-Use broader geopolitical or denominational grouping (e.g., “United States”, “Scandinavia”, “Africa”, “South America”, etc.) if discernible from headings.
-Conferences:
-Always populate this with the territorial heading (state, country, or mission).
-Examples: “MICHIGAN,” “DENMARK,” “NORTH PACIFIC,” “GERMAN UNION CONFERENCE.”
-If none is explicit, inherit from the previous conference heading or the global context (e.g., “General Conference” or “International Mission”).
-Do not ever set conference to “Page,” “Directory,” or anything that is not a territory or conference.
+Use broader geopolitical or denominational grouping (e.g., "United States", "Scandinavia", "Africa", "South America", etc.) if discernible from headings.
+
 Contextual Propagation:
 When multiple people are listed under one heading, inherit the same conference / organization / location until a new section heading appears.
+The conference value from a section heading applies to ALL people in that section until a new conference heading appears.
 Reset on new section headings.
+
 Formatting Requirements:
 Output one JSON object per line (JSONL).
 Strict JSON — double quotes around keys and values.
 No trailing commas or markdown formatting.
+
 Examples of valid entries:
-{"yearbook_year":1883,"page":7,"name":"Geo. I. Butler","last_name":"Butler","prefix":null,"suffix":null,"gender":"male","position":"President","position_information":null,"organization":"General Conference","group":null,"conference":null,"institution_name":null,"location":"Battle Creek, Mich.","region":"United States"}
+{"yearbook_year":1883,"page":7,"name":"Geo. I. Butler","last_name":"Butler","prefix":null,"suffix":null,"gender":"male","position":"President","position_information":null,"organization":"General Conference","group":null,"conference":"General Conference","institution_name":null,"location":"Battle Creek, Mich.","region":"United States"}
 {"yearbook_year":1883,"page":12,"name":"S. N. Haskell","last_name":"Haskell","prefix":null,"suffix":null,"gender":"male","position":"President","position_information":null,"organization":"Pacific S.D.A. Publishing Association","group":"Publishing Association Directories","conference":"California","institution_name":null,"location":"South Lancaster, Mass.","region":"United States"}
-{"yearbook_year":1904,"page":11,"name":"A. G. Daniells","last_name":"Daniells","prefix":null,"suffix":null,"gender":"male","position":"President","position_information":null,"organization":"General Conference","group":null,"conference":null,"institution_name":null,"location":"Washington, D.C.","region":"United States"}
-{"yearbook_year":1904,"page":15,"name":"W. W. Prescott","last_name":"Prescott","prefix":null,"suffix":null,"gender":"male","position":"Second Vice-President","position_information":null,"organization":"General Conference","group":null,"conference":null,"institution_name":null,"location":"Washington, D.C.","region":"United States"}
-{"yearbook_year":1904,"page":27,"name":"S. Fulton","last_name":"Fulton","prefix":null,"suffix":null,"gender":"male","position":"President","position_information":null,"organization":"Tennessee Conference","group":"State Conference Directories","conference":"Tennessee","institution_name":null,"location":"Nashville, Tenn.","region":"United States"}
-"""
+{"yearbook_year":1904,"page":11,"name":"A. G. Daniells","last_name":"Daniells","prefix":null,"suffix":null,"gender":"male","position":"President","position_information":null,"organization":"General Conference","group":null,"conference":"General Conference","institution_name":null,"location":"Washington, D.C.","region":"United States"}
+{"yearbook_year":1904,"page":15,"name":"W. W. Prescott","last_name":"Prescott","prefix":null,"suffix":null,"gender":"male","position":"Second Vice-President","position_information":null,"organization":"General Conference","group":null,"conference":"General Conference","institution_name":null,"location":"Washington, D.C.","region":"United States"}
+{"yearbook_year":1904,"page":27,"name":"S. Fulton","last_name":"Fulton","prefix":null,"suffix":null,"gender":"male","position":"President","position_information":null,"organization":"Tennessee Conference","group":"State Conference Directories","conference":"Tennessee","institution_name":null,"location":"Nashville, Tenn.","region":"United States"}"""
 
 def build_user_prompt(page_text: str, page_index: Optional[int], year: Optional[int]) -> str:
     # Trim noisy whitespace and long runs
