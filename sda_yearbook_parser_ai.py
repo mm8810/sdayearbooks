@@ -62,7 +62,7 @@ class ProviderBase:
     def __init__(self, model: str, limiter: TokenBucket):
         self.model = model
         self.limiter = limiter
-    def complete(self, system_prompt: str, user_text: str, max_output_tokens: int = 400) -> str:
+    def complete(self, system_prompt: str, user_text: str, max_output_tokens: int = 12000) -> str:
         raise NotImplementedError
 
 
@@ -77,7 +77,7 @@ class OpenAIProvider(ProviderBase):
         self.client = OpenAI(api_key=api_key)
 
     @retry(stop=stop_after_attempt(6), wait=wait_exponential(multiplier=1, min=1, max=20), retry=retry_if_exception_type(Exception))
-    def complete(self, system_prompt: str, user_text: str, max_output_tokens: int = 400) -> str:
+    def complete(self, system_prompt: str, user_text: str, max_output_tokens: int = 12000) -> str:
         total_est = estimate_tokens_from_text(system_prompt) + estimate_tokens_from_text(user_text) + max_output_tokens
         self.limiter.acquire(total_est)
         try:
@@ -109,7 +109,7 @@ class AnthropicProvider(ProviderBase):
         self.client = anthropic.Anthropic(api_key=api_key)
 
     @retry(stop=stop_after_attempt(6), wait=wait_exponential(multiplier=1, min=1, max=20), retry=retry_if_exception_type(Exception))
-    def complete(self, system_prompt: str, user_text: str, max_output_tokens: int = 400) -> str:
+    def complete(self, system_prompt: str, user_text: str, max_output_tokens: int = 12000) -> str:
         total_est = estimate_tokens_from_text(system_prompt) + estimate_tokens_from_text(user_text) + max_output_tokens
         self.limiter.acquire(total_est)
         try:
@@ -333,7 +333,7 @@ def run(pdf: Path,
         i, txt = item
         user_prompt = build_user_prompt(txt, i, year)
         def caller():
-            return provider.complete(SYSTEM_PROMPT, user_prompt, max_output_tokens=400)
+            return provider.complete(SYSTEM_PROMPT, user_prompt, max_output_tokens=12000)
         result_text = cached_complete(provider_name, model, caller, SYSTEM_PROMPT, user_prompt)
         out_rows: List[Row] = []
         for line in result_text.splitlines():
