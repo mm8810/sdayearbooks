@@ -1,0 +1,9 @@
+{
+  "datasets": [
+    {
+      "year": 1883,
+      "file": "data/1883.csv",
+      "label": "1883 Yearbook"
+    }
+  ]
+}

@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SDA Yearbook Figures Timeline</title>
+
+  <!-- vis-timeline -->
+  <link href="https://unpkg.com/vis-timeline@latest/styles/vis-timeline-graph2d.min.css" rel="stylesheet" />
+  <script defer src="https://unpkg.com/vis-timeline@latest/standalone/umd/vis-timeline-graph2d.min.js"></script>
+
+  <!-- PapaParse for CSV parsing -->
+  <script defer src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
+
+  <!-- d3 for hierarchy view -->
+  <script defer src="https://unpkg.com/d3@7.9.0/dist/d3.min.js"></script>
+
+  <link rel="stylesheet" href="styles.css" />
+  <script defer src="app.js"></script>
+</head>
+
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand__title">SDA Yearbook Figures Timeline</div>
+      <div class="brand__subtitle">Prototype viewer (1883–1921 ready)</div>
+    </div>
+
+    <div class="topbar__actions">
+      <a class="btn" href="#" id="hierarchyBtn" title="Open hierarchical position view by conference">Hierarchy view</a>
+      <a class="btn" href="#" id="exportBtn" title="Download current filtered view as JSON">Export view</a>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="panel">
+      <section class="panel__section">
+        <h2>Datasets</h2>
+        <div id="datasetList" class="datasetList"></div>
+      </section>
+
+      <section class="panel__section">
+        <h2>Filters</h2>
+
+        <label class="field">
+          <span class="field__label">Search name</span>
+          <input id="searchInput" type="search" placeholder="e.g., Andrews" autocomplete="off" />
+        </label>
+
+        <div class="fieldRow">
+          <label class="field">
+            <span class="field__label">Region</span>
+            <select id="regionSelect">
+              <option value="">All regions</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span class="field__label">Conference</span>
+            <select id="confSelect">
+              <option value="">All conferences</option>
+            </select>
+          </label>
+        </div>
+
+        <label class="field">
+          <span class="field__label">Organization contains</span>
+          <input id="orgInput" type="text" placeholder="e.g., General Conference" autocomplete="off" />
+        </label>
+
+        <div class="fieldRow">
+          <label class="field">
+            <span class="field__label">Year range</span>
+            <div class="rangeRow">
+              <input id="yearMin" type="number" min="1800" max="2100" value="1883" />
+              <span class="rangeDash">–</span>
+              <input id="yearMax" type="number" min="1800" max="2100" value="1921" />
+            </div>
+          </label>
+        </div>
+
+        <div class="btnRow">
+          <button class="btn btn--primary" id="applyBtn">Apply</button>
+          <button class="btn" id="resetBtn">Reset</button>
+        </div>
+
+        <p class="hint">
+          Tip: Click an item on the timeline to view details. Use the left-right scroll on the timeline to move through years.
+        </p>
+      </section>
+
+      <section class="panel__section">
+        <h2>Selected</h2>
+        <div id="detailCard" class="detailCard muted">
+          Click a point on the timeline to see details here.
+        </div>
+      </section>
+    </aside>
+
+    <section class="content">
+      <div class="content__top">
+        <div class="stat" id="statLoaded">Loaded: 0 rows</div>
+        <div class="stat" id="statShown">Shown: 0 rows</div>
+        <div class="stat" id="statYears">Years: –</div>
+      </div>
+
+      <div id="timeline" class="timeline"></div>
+
+      <div class="content__bottom">
+        <details>
+          <summary>How to add more yearbooks</summary>
+          <ol>
+            <li>Drop each parsed CSV into <code>data/</code> (e.g., <code>data/1884.csv</code>, <code>data/1885.csv</code>…).</li>
+            <li>Update <code>manifest.json</code> with the year + filename for each dataset.</li>
+            <li>Open <code>index.html</code> using a local web server (not just double-click) so the browser can load CSV files.</li>
+          </ol>
+          <p class="hint">Quick local server options: <code>python3 -m http.server</code> or <code>npx serve</code>.</p>
+        </details>
+      </div>
+    </section>
+  </main>
+
+
+  <!-- Hierarchy Modal -->
+  <div id="hierarchyModal" class="modal" aria-hidden="true">
+    <div class="modal__backdrop" id="hierarchyBackdrop"></div>
+    <div class="modal__panel" role="dialog" aria-modal="true" aria-label="Hierarchy view">
+      <div class="modal__header">
+        <div>
+          <div class="modal__title">Conference hierarchy</div>
+          <div class="modal__subtitle">Grouped by position • Click a node to pin details</div>
+        </div>
+        <div class="modal__actions">
+          <label class="field field--inline">
+            <span class="field__label">Conference</span>
+            <select id="hierarchyConferenceSelect">
+              <option value="">Select a conference</option>
+            </select>
+          </label>
+          <label class="field field--inline">
+            <span class="field__label">Group</span>
+            <select id="hierarchyGroupingSelect">
+  <option value="conference_org_position" selected>
+    Organization → Position → People
+  </option>
+  <option value="position">Position → People</option>
+  <option value="org_position">Organization → Position → People</option>
+  <option value="org_group_position">Organization → Group → Position → People</option>
+</select>
+          </label>
+          <button class="btn" id="hierarchyCloseBtn" type="button">Close</button>
+        </div>
+      </div>
+
+      <div class="modal__body">
+        <div class="hierLayout">
+          <div class="hierChartWrap">
+            <div id="hierarchyChart" class="hierChart"></div>
+          </div>
+          <div class="hierSide">
+            <div class="detailCard muted" id="hierarchyDetail">
+              Select a conference to render the hierarchy. Then click a node for details.
+            </div>
+            <div class="hint" style="margin-top:10px;">
+              Notes:
+              <ul style="margin:6px 0 0 18px; padding:0; color:inherit;">
+                <li>Positions are grouped by exact string match (you can normalize later).</li>
+                <li>Names under a position are sorted alphabetically.</li>
+                <li>Only rows currently loaded (enabled datasets) are included.</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+
+  <footer class="footer">
+    Built for: Mary Ma — “From Scans to Structure” (SDA Yearbooks, 1800s–1920s)
+  </footer>
+</body>
+</html>
