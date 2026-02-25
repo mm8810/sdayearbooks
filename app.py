@@ -5,6 +5,9 @@ from flask import Flask, render_template, request, send_file, redirect, url_for,
 from werkzeug.utils import secure_filename
 import re
 from pathlib import Path
+import zipfile
+from collections import Counter
+
 
 # Prefilter (keep as-is from your file)
 from ai_prefilter import prefilter_pdf_for_ai
@@ -20,24 +23,45 @@ ALLOWED_EXTENSIONS = {"pdf"}
 def allowed_file(filename: str) -> bool:
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
-def _pick_uploaded_file(req):
+def pick_uploaded_pdfs(req):
     """
-    Accepts common field names and falls back to any .pdf file field.
-    Returns (FileStorage or None, reason_string).
+    Returns (List[FileStorage], reason_string)
+    Accepts common field names and also supports <input multiple>.
     """
-    preferred = ["file", "pdf", "upload", "document"]
+    preferred = ["file", "files", "pdf", "upload", "document"]
+    found = []
+
+    # 1) Try getlist() on common keys (supports multiple)
     for key in preferred:
-        fs = req.files.get(key)
-        if fs and getattr(fs, "filename", "") and allowed_file(fs.filename):
-            return fs, f"found in field '{key}'"
-    # Fallback: any file with .pdf extension
-    for key, fs in req.files.items():
-        if fs and getattr(fs, "filename", "") and allowed_file(fs.filename):
-            return fs, f"found in field '{key}' (fallback)"
+        if key in req.files:
+            items = req.files.getlist(key)
+            for fs in items:
+                if fs and getattr(fs, "filename", "") and allowed_file(fs.filename):
+                    found.append(fs)
+
+    # 2) Fallback: scan everything in req.files
+    if not found:
+        for _, fs in req.files.items():
+            if fs and getattr(fs, "filename", "") and allowed_file(fs.filename):
+                found.append(fs)
+
+    if found:
+        return found, f"found {len(found)} pdf(s)"
     if req.files:
         any_name = next(iter(req.files.keys()), None)
-        return None, f"files present but not PDF (first field: {any_name})"
-    return None, "no files in request"
+        return [], f"files present but not PDF (first field: {any_name})"
+    return [], "no files in request"
+
+
+def make_output_name(original_filename: str, year: Optional[int]) -> str:
+    """
+    Prefer YB1883.csv naming. If year can't be inferred, fall back to stem.
+    """
+    if year:
+        return f"YB{year}.csv"
+    stem = Path(original_filename).stem
+    stem = re.sub(r"[^A-Za-z0-9_-]+", "_", stem).strip("_") or "yearbook"
+    return f"{stem}.csv"
 
 def guess_year_from_filename(name: str) -> Optional[int]:
     m = re.search(r"(18|19)\d{2}", name)
@@ -103,88 +127,137 @@ def create_app():
 
     @app.route("/analyze", methods=["POST"])
     def analyze():
-        file, how_found = _pick_uploaded_file(request)
-        if not file or file.filename == "" or not allowed_file(file.filename):
+        pdf_files, how_found = pick_uploaded_pdfs(request)
+        if not pdf_files:
             from datetime import datetime
             print(f"[analyze] {datetime.now().isoformat()} - upload issue: {how_found}; fields={list(request.files.keys())}")
-            flash("I couldn't find a PDF in your upload. Please choose a .pdf file and try again. "
-                  "(Tip: the file input name should be 'file', 'pdf', or 'upload')")
+            flash("I couldn't find a PDF in your upload. Please choose one or more .pdf files and try again.")
             return redirect(url_for("index"))
-
-        filename = secure_filename(file.filename)
-        tmpdir = tempfile.mkdtemp(prefix="sda_yearbook_")
-        pdf_path = os.path.join(tmpdir, filename)
-        file.save(pdf_path)
 
         engine = (request.form.get("engine") or "ai").strip().lower()
         provider = (request.form.get("provider") or "openai").strip().lower()
         model = (request.form.get("model") or "gpt-4.1").strip()
-        year = request.form.get("year")
-        year = int(year) if year and year.isdigit() else guess_year_from_filename(filename)
+        year_override = request.form.get("year")
+        year_override = int(year_override) if year_override and year_override.isdigit() else None
 
-        # Where to write CSV
-        out_dir = os.path.join(tempfile.gettempdir(), "sda_yearbook_results")
-        os.makedirs(out_dir, exist_ok=True)
+        # Results are stored under a per-run token folder
+        out_root = os.path.join(tempfile.gettempdir(), "sda_yearbook_results")
+        os.makedirs(out_root, exist_ok=True)
         token = uuid.uuid4().hex
-        out_csv = os.path.join(out_dir, f"sda_yearbook_{token}.csv")
+        run_dir = os.path.join(out_root, token)
+        os.makedirs(run_dir, exist_ok=True)
 
-        if engine == "rules":
-            parser_mod = pick_rule_parser(year)
-            rows = parser_mod.extract_from_pdf(pdf_path)
-            rows_dicts = [r.__dict__ if hasattr(r, "__dict__") else r for r in rows]
-            csv_bytes = rows_to_csv_bytes_rule(rows_dicts)
-            with open(out_csv, "wb") as f:
-                f.write(csv_bytes)
-        else:
-            # AI path: prefilter aggressively to reduce tokens
-            pages = prefilter_pdf_for_ai(pdf_path, context_window=3)
-            max_pages = int(os.environ.get("AI_MAX_PAGES", "40"))
-            pages = pages[:max_pages]
+        tmpdir = tempfile.mkdtemp(prefix="sda_yearbook_")
 
-            # Write prefiltered text bundle for the AI runner
-            pre_txt = os.path.join(tmpdir, f"ai_pages_{token}.txt")
-            with open(pre_txt, "w", encoding="utf-8") as f:
-                for i, txt in pages:
-                    f.write(f"\n\n==== PAGE {i} ====\n{(txt or '').strip()}\n")
+        produced_csvs = []
+        combined_rows_for_summary = []
 
-            pai.run(
-                pdf=Path(pdf_path),
-                provider_name=provider,
-                model=model,
-                out_csv=Path(out_csv),
-                year=year,
-                start=None,
-                end=None,
-                max_pages=max_pages,
-                prefiltered_text_path=Path(pre_txt),
+        used_names = Counter()
+
+        for fs in pdf_files:
+            filename = secure_filename(fs.filename)
+            pdf_path = os.path.join(tmpdir, filename)
+            fs.save(pdf_path)
+
+            year = year_override if year_override else guess_year_from_filename(filename)
+
+            # Output name: YB1883.csv (or fallback)
+            base_name = make_output_name(filename, year)
+            used_names[base_name] += 1
+            if used_names[base_name] > 1:
+                # avoid collisions if two files resolve to same year/name
+                stem, ext = os.path.splitext(base_name)
+                base_name = f"{stem}_{used_names[base_name]}{ext}"
+
+            out_csv = os.path.join(run_dir, base_name)
+
+            if engine == "rules":
+                parser_mod = pick_rule_parser(year)
+                rows = parser_mod.extract_from_pdf(pdf_path)
+                rows_dicts = [r.__dict__ if hasattr(r, "__dict__") else r for r in rows]
+                csv_bytes = rows_to_csv_bytes_rule(rows_dicts)
+                with open(out_csv, "wb") as f:
+                    f.write(csv_bytes)
+                combined_rows_for_summary.extend(rows_dicts)
+
+            else:
+                # AI path: prefilter aggressively to reduce tokens
+                pages = prefilter_pdf_for_ai(pdf_path, context_window=3)
+                max_pages = int(os.environ.get("AI_MAX_PAGES", "40"))
+                pages = pages[:max_pages]
+
+                pre_txt = os.path.join(tmpdir, f"ai_pages_{uuid.uuid4().hex}.txt")
+                with open(pre_txt, "w", encoding="utf-8") as f:
+                    for i, txt in pages:
+                        f.write(f"\n\n==== PAGE {i} ====\n{(txt or '').strip()}\n")
+
+                pai.run(
+                    pdf=Path(pdf_path),
+                    provider_name=provider,
+                    model=model,
+                    out_csv=Path(out_csv),
+                    year=year,
+                    start=None,
+                    end=None,
+                    max_pages=max_pages,
+                    prefiltered_text_path=Path(pre_txt),
+                )
+
+                # re-read for summary
+                try:
+                    import pandas as pd
+                    df = pd.read_csv(out_csv)
+                    rows_dicts = df.fillna("").to_dict(orient="records")
+                except Exception:
+                    rows_dicts = []
+
+                combined_rows_for_summary.extend(rows_dicts)
+
+            produced_csvs.append(out_csv)
+
+        # If multiple CSVs, zip them for a single download click
+        if len(produced_csvs) > 1:
+            zip_path = os.path.join(run_dir, f"YB_outputs_{token}.zip")
+            with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
+                for p in produced_csvs:
+                    z.write(p, arcname=os.path.basename(p))
+            dl_url = url_for("download_token", token=token)
+            info = summarize(combined_rows_for_summary)
+            return (
+                f"<p><b>Done.</b> Files: {len(produced_csvs)} • Rows: {info['total_rows']} • "
+                f"<a href='{dl_url}'>Download ZIP</a></p>"
+                f"<pre>Top conferences (sample): {info['top_conferences']}</pre>"
             )
 
-            # rows already written to CSV; re-read for summary
-            import pandas as pd
-            try:
-                df = pd.read_csv(out_csv)
-                rows_dicts = df.fillna("").to_dict(orient="records")
-            except Exception:
-                rows_dicts = []
-
-        info = summarize(rows_dicts if engine != "rules" else rows_dicts)
+        # Single file: return that CSV directly
         dl_url = url_for("download_token", token=token)
-        html = (
+        info = summarize(combined_rows_for_summary)
+        return (
             f"<p><b>Done.</b> Rows: {info['total_rows']}. "
             f"<a href='{dl_url}'>Download CSV</a></p>"
             f"<pre>Top conferences (sample): {info['top_conferences']}</pre>"
         )
-        return html
-
     @app.route("/download/<token>", methods=["GET"])
     def download_token(token):
-        tmpdir = os.path.join(tempfile.gettempdir(), "sda_yearbook_results")
-        csv_path = os.path.join(tmpdir, f"sda_yearbook_{token}.csv")
-        if not os.path.exists(csv_path):
+        run_dir = os.path.join(tempfile.gettempdir(), "sda_yearbook_results", token)
+        if not os.path.isdir(run_dir):
             from flask import abort
             abort(404)
-        return send_file(csv_path, mimetype="text/csv", as_attachment=True, download_name="sda_yearbook_results.csv")
 
+        # Prefer ZIP if present
+        zips = [p for p in os.listdir(run_dir) if p.lower().endswith(".zip")]
+        if zips:
+            zip_path = os.path.join(run_dir, zips[0])
+            return send_file(zip_path, mimetype="application/zip", as_attachment=True, download_name=zips[0])
+
+        # Otherwise, send the single CSV
+        csvs = [p for p in os.listdir(run_dir) if p.lower().endswith(".csv")]
+        if len(csvs) == 1:
+            csv_path = os.path.join(run_dir, csvs[0])
+            return send_file(csv_path, mimetype="text/csv", as_attachment=True, download_name=csvs[0])
+
+        from flask import abort
+        abort(404)
     return app
 
 if __name__ == "__main__":

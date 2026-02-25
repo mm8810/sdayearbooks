@@ -6,3 +6,4 @@ tenacity
 python-dateutil
 pydantic
 dotenv
+collections
