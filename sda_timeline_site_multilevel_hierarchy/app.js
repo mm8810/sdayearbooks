@@ -752,6 +752,9 @@ els.orgSelect = $("orgSelect");
   els.searchInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter") applyFilters();
   });
+
+  attachTabHandlers();
+  attachSummaryHandlers();
 }
 
 window.addEventListener("DOMContentLoaded", () => {
@@ -761,3 +764,203 @@ window.addEventListener("DOMContentLoaded", () => {
   });
 });
 
+
+
+/* ----------------------------
+   Summary tab
+-----------------------------*/
+
+function normGender(g){
+  const s = safe(g).toLowerCase();
+  if (!s) return "";
+  if (s.startsWith("f")) return "female";
+  if (s.startsWith("m")) return "male";
+  return s;
+}
+
+function personId(r){
+  const n = safe(r.name);
+  if (n) return n.toLowerCase();
+  const combo = [safe(r.prefix), safe(r.last_name), safe(r.suffix)].filter(Boolean).join(" ").trim();
+  return combo ? combo.toLowerCase() : "(unknown)";
+}
+
+function setSelectOptions(selectEl, values, {includeAll=true, allLabel="All"} = {}){
+  if (!selectEl) return;
+  const cur = selectEl.value;
+  selectEl.innerHTML = "";
+  if (includeAll){
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = allLabel;
+    selectEl.appendChild(opt);
+  }
+  for (const v of values){
+    const opt = document.createElement("option");
+    opt.value = v;
+    opt.textContent = v;
+    selectEl.appendChild(opt);
+  }
+  if (cur && Array.from(selectEl.options).some(o => o.value === cur)){
+    selectEl.value = cur;
+  } else {
+    selectEl.value = "";
+  }
+}
+
+function computePerYear(rows){
+  const byYear = new Map();
+  for (const r of rows){
+    const y = Number(r.yearbook_year);
+    if (!Number.isFinite(y)) continue;
+    if (!byYear.has(y)) byYear.set(y, {people:new Set(), conf:new Set(), women:new Set()});
+    const b = byYear.get(y);
+    const pid = personId(r);
+    b.people.add(pid);
+
+    const conf = safe(r.conference);
+    if (conf) b.conf.add(conf);
+
+    if (normGender(r.gender) === "female"){
+      b.women.add(pid);
+    }
+  }
+  const years = Array.from(byYear.keys()).sort((a,b)=>a-b);
+  return years.map(y => ({
+    year:y,
+    unique_people: byYear.get(y).people.size,
+    conferences: byYear.get(y).conf.size,
+    women: byYear.get(y).women.size
+  }));
+}
+
+function renderPerYearTable(rows){
+  const table = $("perYearTable");
+  const tbody = table ? table.querySelector("tbody") : null;
+  if (!tbody) return;
+  tbody.innerHTML = "";
+  const stats = computePerYear(rows);
+  for (const s of stats){
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${s.year}</td>
+      <td>${s.unique_people.toLocaleString()}</td>
+      <td>${s.conferences.toLocaleString()}</td>
+      <td>${s.women.toLocaleString()}</td>
+    `;
+    tbody.appendChild(tr);
+  }
+}
+
+function hydrateSummaryFilters(rows){
+  const years = Array.from(new Set(rows.map(r => Number(r.yearbook_year)).filter(Number.isFinite))).sort((a,b)=>a-b).map(String);
+  const confs = uniqSorted(rows.map(r => safe(r.conference)));
+  const orgs = uniqSorted(rows.map(r => safe(r.organization)));
+  const roles = uniqSorted(rows.map(r => safe(r.position)));
+  const genders = uniqSorted(rows.map(r => normGender(r.gender))).filter(Boolean);
+
+  setSelectOptions($("sumYear"), years, {includeAll:true, allLabel:"All years"});
+  setSelectOptions($("sumConference"), confs, {includeAll:true, allLabel:"All conferences"});
+  setSelectOptions($("sumOrganization"), orgs, {includeAll:true, allLabel:"All organizations"});
+  setSelectOptions($("sumRole"), roles, {includeAll:true, allLabel:"All roles"});
+  setSelectOptions($("sumGender"), genders, {includeAll:true, allLabel:"All genders"});
+}
+
+function applySummaryFilter(rows){
+  const year = safe($("sumYear")?.value);
+  const conf = safe($("sumConference")?.value);
+  const org  = safe($("sumOrganization")?.value);
+  const role = safe($("sumRole")?.value);
+  const gen  = safe($("sumGender")?.value);
+
+  return rows.filter(r => {
+    if (year && String(r.yearbook_year) !== year) return false;
+    if (conf && safe(r.conference) !== conf) return false;
+    if (org  && safe(r.organization) !== org) return false;
+    if (role && safe(r.position) !== role) return false;
+    if (gen  && normGender(r.gender) !== gen) return false;
+    return true;
+  });
+}
+
+function renderSummaryKpis(rows){
+  const filtered = applySummaryFilter(rows);
+  const people = new Set(filtered.map(personId));
+  const elPeople = $("sumUniquePeople");
+  const elRows = $("sumRows");
+  if (elPeople) elPeople.textContent = people.size.toLocaleString();
+  if (elRows) elRows.textContent = filtered.length.toLocaleString();
+
+  const ul = $("sumNameSample");
+  if (ul){
+    ul.innerHTML = "";
+    const names = Array.from(new Set(filtered.map(r => safe(r.name)).filter(Boolean)))
+      .sort((a,b)=>a.localeCompare(b))
+      .slice(0,25);
+    for (const n of names){
+      const li = document.createElement("li");
+      li.textContent = n;
+      ul.appendChild(li);
+    }
+    if (!names.length){
+      const li = document.createElement("li");
+      li.textContent = "(no names for this filter)";
+      ul.appendChild(li);
+    }
+  }
+}
+
+function attachSummaryHandlers(){
+  const ids = ["sumYear","sumConference","sumOrganization","sumRole","sumGender"];
+  for (const id of ids){
+    const el = $(id);
+    if (el){
+      el.addEventListener("change", () => renderSummaryKpis(allRows));
+    }
+  }
+}
+
+function setSummaryLoadedStat(){
+  const el = $("sumStatLoaded");
+  if (!el) return;
+  const years = Array.from(enabledYears).sort((a,b)=>a-b);
+  const label = years.length ? `${years[0]}–${years[years.length-1]}` : "–";
+  el.textContent = `Loaded: ${allRows.length.toLocaleString()} rows (${label})`;
+}
+
+function attachTabHandlers(){
+  const btnSum = $("tabBtnSummary");
+  const btnTime = $("tabBtnTimeline");
+  const paneSum = $("tabSummary");
+  const paneTime = $("tabTimeline");
+  if (!btnSum || !btnTime || !paneSum || !paneTime) return;
+
+  function activate(which){
+    const sumOn = which === "summary";
+    btnSum.classList.toggle("active", sumOn);
+    btnTime.classList.toggle("active", !sumOn);
+    paneSum.classList.toggle("active", sumOn);
+    paneTime.classList.toggle("active", !sumOn);
+
+    if (!sumOn && timeline){
+      setTimeout(() => { try { timeline.redraw(); } catch(e){} }, 50);
+    }
+  }
+
+  btnSum.addEventListener("click", (e) => { e.preventDefault(); activate("summary"); });
+  btnTime.addEventListener("click", (e) => { e.preventDefault(); activate("timeline"); });
+}
+
+function refreshSummary(){
+  setSummaryLoadedStat();
+  renderPerYearTable(allRows);
+  hydrateSummaryFilters(allRows);
+  renderSummaryKpis(allRows);
+}
+
+// Wrap reloadAllEnabled so Summary stays in sync with toggled datasets
+const __reloadAllEnabled = reloadAllEnabled;
+reloadAllEnabled = async function(){
+  await __reloadAllEnabled();
+  refreshSummary();
+};

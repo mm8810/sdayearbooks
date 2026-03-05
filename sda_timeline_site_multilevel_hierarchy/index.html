@@ -20,7 +20,92 @@
 </head>
 
 <body>
-  <header class="topbar">
+  
+  <div class="tabs">
+    <button class="tabbtn active" id="tabBtnSummary" data-tab="summary">Summary</button>
+    <button class="tabbtn" id="tabBtnTimeline" data-tab="timeline">Timeline</button>
+  </div>
+
+  <section id="tabSummary" class="tabpane active" aria-label="Summary">
+    <header class="topbar topbar--summary">
+      <div class="brand">
+        <div class="brand__title">Yearbook Summary</div>
+        <div class="brand__subtitle">Counts computed from enabled datasets in <code>manifest.json</code></div>
+      </div>
+      <div class="topbar__actions">
+        <span class="statpill" id="sumStatLoaded">Loaded: –</span>
+      </div>
+    </header>
+
+    <main class="layout layout--summary">
+      <section class="panel">
+        <h2>Per-year totals</h2>
+        <div class="hint">“Unique individuals” are deduplicated by normalized full name (uses <code>name</code>, falls back to <code>prefix + last_name + suffix</code>).</div>
+        <div class="tablewrap">
+          <table class="table" id="perYearTable" aria-label="Per-year table">
+            <thead>
+              <tr>
+                <th>Year</th>
+                <th>Unique individuals</th>
+                <th>Conferences</th>
+                <th>Women</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Drill-down</h2>
+        <div class="hint">Example: Conference = <b>California</b>, Gender = <b>female</b>, Role = <b>Secretary</b>.</div>
+
+        <div class="filters grid5">
+          <label class="field">
+            <span>Year</span>
+            <select id="sumYear"></select>
+          </label>
+          <label class="field">
+            <span>Conference</span>
+            <select id="sumConference"></select>
+          </label>
+          <label class="field">
+            <span>Organization</span>
+            <select id="sumOrganization"></select>
+          </label>
+          <label class="field">
+            <span>Role</span>
+            <select id="sumRole"></select>
+          </label>
+          <label class="field">
+            <span>Gender</span>
+            <select id="sumGender"></select>
+          </label>
+        </div>
+
+        <div class="kpirow">
+          <div class="kpi">
+            <div class="kpi__label">Unique individuals matching filters</div>
+            <div class="kpi__value" id="sumUniquePeople">–</div>
+          </div>
+          <div class="kpi">
+            <div class="kpi__label">Matching rows</div>
+            <div class="kpi__value" id="sumRows">–</div>
+          </div>
+        </div>
+
+        <details class="details">
+          <summary>Show a few matching names</summary>
+          <div class="hint">Sample up to 25 names (to sanity-check the filter combination).</div>
+          <ul class="namelist" id="sumNameSample"></ul>
+        </details>
+      </section>
+    </main>
+  </section>
+
+  <section id="tabTimeline" class="tabpane" aria-label="Timeline">
+
+<header class="topbar">
     <div class="brand">
       <div class="brand__title">SDA Yearbook Figures Timeline</div>
       <div class="brand__subtitle">Prototype viewer (1883–1921 ready)</div>
@@ -197,6 +282,7 @@
   <footer class="footer">
     Built for: Mary Ma — “From Scans to Structure” (SDA Yearbooks, 1800s–1920s)
   </footer>
+  </section>
 </body>
 </html>
 
