@@ -279,9 +279,12 @@ input::placeholder{ color:#7f8bb0; }
   border:1px solid var(--line);
   border-radius:16px;
   background: rgba(17,27,59,.22);
-  overflow:auto;
+  overflow:hidden;
   height:100%;
 }
+.hierChartWrap svg{ display:block; }
+.hierChartWrap{ cursor: grab; }
+.hierChartWrap:active{ cursor: grabbing; }
 .hierChart{ height:100%; width:100%; }
 .hierSide{ height:100%; overflow:auto; }
 
@@ -304,3 +307,4 @@ input::placeholder{ color:#7f8bb0; }
 @media (max-width: 980px){
   .hierLayout{ grid-template-columns: 1fr; }
 }
+

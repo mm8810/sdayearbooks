@@ -1,9 +1,3 @@
-/* SDA Timeline Prototype
-   - Loads one or more CSV datasets listed in manifest.json
-   - Renders each row as a point at Jan 1 of the yearbook year
-   - Provides lightweight filters: name search, region, conference, org substring, year range
-*/
-
 let manifest = null;
 let allRows = [];      // raw rows across all enabled datasets
 let enabledYears = new Set();
@@ -76,16 +70,52 @@ function setStats(){
 function hydrateFilterOptions(){
   const regions = uniqSorted(allRows.map(r => r.region));
   const confs = uniqSorted(allRows.map(r => r.conference));
+  const positions = uniqSorted(allRows.map(r => r.position));
+  const genders = uniqSorted(allRows.map(r => r.gender));
+  const orgs = uniqSorted(
+    allRows
+      .map(r => safe(r.organization) || safe(r.institution_name))
+      .filter(v => safe(v))
+  );
 
   // Preserve current selection when possible
   const prevRegion = els.regionSelect.value;
   const prevConf = els.confSelect.value;
+  const prevPos = els.positionSelect?.value || "";
+  const prevGender = els.genderSelect?.value || "";
+  const prevOrg = els.orgSelect?.value || "";
 
-  els.regionSelect.innerHTML = '<option value="">All regions</option>' + regions.map(r => `<option value="${escapeHtml(r)}">${escapeHtml(r)}</option>`).join("");
-  els.confSelect.innerHTML = '<option value="">All conferences</option>' + confs.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join("");
+  els.regionSelect.innerHTML =
+    '<option value="">All regions</option>' +
+    regions.map(r => `<option value="${escapeHtml(r)}">${escapeHtml(r)}</option>`).join("");
+
+  els.confSelect.innerHTML =
+    '<option value="">All conferences</option>' +
+    confs.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join("");
+
+  if (els.positionSelect){
+    els.positionSelect.innerHTML =
+      '<option value="">All positions</option>' +
+      positions.map(p => `<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`).join("");
+  }
+
+  if (els.genderSelect){
+    els.genderSelect.innerHTML =
+      '<option value="">All genders</option>' +
+      genders.map(g => `<option value="${escapeHtml(g)}">${escapeHtml(g)}</option>`).join("");
+  }
+
+  if (els.orgSelect){
+    els.orgSelect.innerHTML =
+      '<option value="">All organizations</option>' +
+      orgs.map(o => `<option value="${escapeHtml(o)}">${escapeHtml(o)}</option>`).join("");
+  }
 
   if (regions.includes(prevRegion)) els.regionSelect.value = prevRegion;
   if (confs.includes(prevConf)) els.confSelect.value = prevConf;
+  if (els.positionSelect && positions.includes(prevPos)) els.positionSelect.value = prevPos;
+  if (els.genderSelect && genders.includes(prevGender)) els.genderSelect.value = prevGender;
+  if (els.orgSelect && orgs.includes(prevOrg)) els.orgSelect.value = prevOrg;
 }
 
 function escapeHtml(str){
@@ -101,7 +131,9 @@ function applyFilters(){
   const q = safe(els.searchInput.value).toLowerCase();
   const region = safe(els.regionSelect.value);
   const conf = safe(els.confSelect.value);
-  const orgq = safe(els.orgInput.value).toLowerCase();
+  const pos = safe(els.positionSelect?.value);
+  const gender = safe(els.genderSelect?.value);
+  const orgSel = safe(els.orgSelect?.value);
   const yMin = Number(els.yearMin.value || 0);
   const yMax = Number(els.yearMax.value || 9999);
 
@@ -115,25 +147,27 @@ function applyFilters(){
       const ln = safe(r.last_name).toLowerCase();
       if (!nm.includes(q) && !ln.includes(q)) return false;
     }
+
     if (region && safe(r.region) !== region) return false;
     if (conf && safe(r.conference) !== conf) return false;
 
-    if (orgq){
-      const org = safe(r.organization).toLowerCase();
-      const inst = safe(r.institution_name).toLowerCase();
-      if (!org.includes(orgq) && !inst.includes(orgq)) return false;
+    if (pos && safe(r.position) !== pos) return false;
+    if (gender && safe(r.gender) !== gender) return false;
+
+    if (orgSel){
+      const orgLabel = safe(r.organization) || safe(r.institution_name);
+      if (safe(orgLabel) !== orgSel) return false;
     }
+
     return true;
   });
 
   lastFiltered = filtered;
 
-  // Update timeline
   const itemObjs = filtered.map((r, i) => rowToItem(r, i));
   items.clear();
   items.add(itemObjs);
 
-  // Update groups to only those present
   const groupNames = uniqSorted(itemObjs.map(it => it.group));
   const groups = groupNames.map(g => ({ id: g, content: g }));
   timeline.setGroups(groups);
@@ -145,7 +179,9 @@ function resetFilters(){
   els.searchInput.value = "";
   els.regionSelect.value = "";
   els.confSelect.value = "";
-  els.orgInput.value = "";
+  if (els.positionSelect) els.positionSelect.value = "";
+  if (els.genderSelect) els.genderSelect.value = "";
+  if (els.orgSelect) els.orgSelect.value = "";
   els.yearMin.value = "1883";
   els.yearMax.value = "1921";
   applyFilters();
@@ -423,12 +459,21 @@ function renderHierarchyForConference(confName){
   const innerH = x1 - x0 + margin.top + margin.bottom;
   const innerW = (root.height + 1) * 200 + margin.left + margin.right;
 
-  const svg = d3.select(wrap).append("svg")
-    .attr("width", Math.max(width, innerW))
-    .attr("height", Math.max(height, innerH))
-    .attr("viewBox", [0, 0, Math.max(width, innerW), Math.max(height, innerH)].join(" "));
+  // Create a fixed-size viewport SVG and enable pan/zoom inside it.
+  // (If the SVG grows to innerW/innerH, there's nothing to pan; you just get scrollbars.)
+  const viewportW = Math.max(320, width);
+  const viewportH = Math.max(240, height);
 
-  const g = svg.append("g")
+  const svg = d3.select(wrap).append("svg")
+    .attr("width", viewportW)
+    .attr("height", viewportH)
+    .attr("viewBox", [0, 0, viewportW, viewportH].join(" "));
+
+  // gZoom is the element that d3.zoom() transforms.
+  const gZoom = svg.append("g").attr("class", "hzoom");
+
+  // g is the tree content in its own coordinate system.
+  const g = gZoom.append("g")
     .attr("transform", `translate(${margin.left},${margin.top - x0})`);
 
   g.append("g")
@@ -473,12 +518,31 @@ function renderHierarchyForConference(confName){
     }
   });
 
+  // Prevent pan from starting when interacting with nodes (keeps clicks crisp).
+  node.on("mousedown.zoom", (event) => event.stopPropagation());
+  node.on("touchstart.zoom", (event) => event.stopPropagation());
+
   svg.on("click", () => {
     hierarchyPinned = null;
     setSelected(null);
     els.hierarchyDetail.classList.add("muted");
     els.hierarchyDetail.textContent = "Click a node to pin details here.";
   });
+
+  // Pan + zoom: drag to pan; wheel/pinch to zoom.
+  const zoom = d3.zoom()
+    .scaleExtent([0.2, 4])
+    .on("zoom", (event) => {
+      gZoom.attr("transform", event.transform);
+    });
+
+  svg.call(zoom).on("dblclick.zoom", null);
+
+  // Fit-to-view on initial render (cap at 1.0 so text stays readable).
+  const fitScale = Math.min(viewportW / innerW, viewportH / innerH, 1);
+  const fitX = (viewportW - innerW * fitScale) / 2;
+  const fitY = (viewportH - innerH * fitScale) / 2;
+  svg.call(zoom.transform, d3.zoomIdentity.translate(fitX, fitY).scale(fitScale));
 
   // Default summary
   els.hierarchyDetail.classList.remove("muted");
@@ -620,7 +684,9 @@ async function main(){
   els.searchInput = $("searchInput");
   els.regionSelect = $("regionSelect");
   els.confSelect = $("confSelect");
-  els.orgInput = $("orgInput");
+  els.positionSelect = $("positionSelect");
+els.genderSelect = $("genderSelect");
+els.orgSelect = $("orgSelect");
   els.yearMin = $("yearMin");
   els.yearMax = $("yearMax");
   els.applyBtn = $("applyBtn");
@@ -694,3 +760,4 @@ window.addEventListener("DOMContentLoaded", () => {
     alert("Failed to load the app. Open the console for details.\n\n" + err.message);
   });
 });
+
