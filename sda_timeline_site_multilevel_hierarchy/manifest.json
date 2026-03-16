@@ -4,6 +4,39 @@
       "year": 1883,
       "file": "data/1883.csv",
       "label": "1883 Yearbook"
-    }
+    },
+    { "year": 1884, 
+    "file": "data/1884.csv", 
+    "label": "1884 Yearbook" },
+    { "year": 1885, 
+    "file": "data/1885.csv", 
+    "label": "1885 Yearbook" },
+    { "year": 1886, 
+    "file": "data/1886.csv", 
+    "label": "1886 Yearbook" },
+    { "year": 1887, 
+    "file": "data/1887.csv", 
+    "label": "1887 Yearbook" },
+    { "year": 1888, "file": 
+    "data/1888.csv", "label": 
+    "1888 Yearbook" },
+    { "year": 1889, "file": 
+    "data/1889.csv", "label": 
+    "1889 Yearbook" },
+    { "year": 1890, "file": 
+    "data/1890.csv", "label": 
+    "1890 Yearbook" },
+    { "year": 1891, "file": 
+    "data/1891.csv", "label": 
+    "1891 Yearbook" },
+    { "year": 1892, "file": 
+    "data/1892.csv", "label": 
+    "1892 Yearbook" },
+    { "year": 1893, "file": 
+    "data/1893.csv", "label": 
+    "1893 Yearbook" },
+    { "year": 1894, "file": 
+    "data/1894.csv", "label": 
+    "1894 Yearbook" }
   ]
 }

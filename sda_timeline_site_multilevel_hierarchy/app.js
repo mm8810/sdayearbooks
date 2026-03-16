@@ -3,7 +3,14 @@ let allRows = [];      // raw rows across all enabled datasets
 let enabledYears = new Set();
 let timeline = null;
 let items = null;
+let groupsData = null;
 let lastFiltered = [];
+let lastConferenceView = { conferenceCount: 0, segmentCount: 0, minYear: null, maxYear: null };
+let selectedConferenceItem = null;
+let selectedConferenceContext = null;
+let selectedOrganizationContext = null;
+let datasetStatus = new Map();
+let datasetLoadIssues = [];
 
 let hierarchyPinned = null;
 
@@ -15,41 +22,32 @@ function safe(v){
   return String(v).trim();
 }
 
+function escapeHtml(str){
+  return String(str)
+    .replaceAll("&","&amp;")
+    .replaceAll("<","&lt;")
+    .replaceAll(">","&gt;")
+    .replaceAll('"',"&quot;")
+    .replaceAll("'","&#039;");
+}
+
 function yearToDate(y){
-  // place all points within a year at Jan 1; timeline groups/collisions handle density.
   return new Date(Number(y), 0, 1);
 }
 
-function buildTitle(row){
-  const name = safe(row.name) || "(unknown)";
-  const pos = safe(row.position);
-  const org = safe(row.organization);
-  const loc = safe(row.location);
-  const page = safe(row.page);
-  const bits = [];
-  if (pos) bits.push(pos);
-  if (org) bits.push(org);
-  if (loc) bits.push(loc);
-  const line = bits.join(" • ");
-  return `${name}\n${line}${page ? `\nPage: ${page}` : ""}`;
+function yearToEndDate(y){
+  return new Date(Number(y) + 1, 0, 1);
 }
 
-function rowToItem(row, idx){
-  const year = Number(row.yearbook_year);
-  const date = yearToDate(year);
+function personDisplayName(row){
+  const direct = safe(row.name);
+  if (direct) return direct;
+  const combo = [safe(row.prefix), safe(row.last_name), safe(row.suffix)].filter(Boolean).join(" ").trim();
+  return combo || "(unknown)";
+}
 
-  const content = safe(row.name) || "(unknown)";
-  const region = safe(row.region) || "Unknown";
-  const group = region; // vis group = region (can change later)
-
-  return {
-    id: `${year}-${idx}`,
-    content,
-    start: date,
-    group,
-    title: buildTitle(row),
-    _row: row
-  };
+function organizationLabel(row){
+  return safe(row.organization) || safe(row.institution_name) || "(No organization)";
 }
 
 function uniqSorted(values){
@@ -57,13 +55,201 @@ function uniqSorted(values){
   return Array.from(s).sort((a,b)=> a.localeCompare(b));
 }
 
-function setStats(){
+function uniqueFiniteYears(rows){
+  return Array.from(
+    new Set(
+      rows
+        .map(r => Number(r.yearbook_year))
+        .filter(Number.isFinite)
+    )
+  ).sort((a,b)=>a-b);
+}
+
+function formatYearRange(startYear, endYear){
+  if (!Number.isFinite(startYear) && !Number.isFinite(endYear)) return "–";
+  if (!Number.isFinite(endYear) || startYear === endYear) return String(startYear);
+  return `${startYear}–${endYear}`;
+}
+
+function summarizeRowCollection(rows){
+  const years = uniqueFiniteYears(rows);
+  const regions = uniqSorted(rows.map(r => safe(r.region)));
+  const organizations = uniqSorted(rows.map(organizationLabel));
+  const positions = uniqSorted(rows.map(r => safe(r.position)));
+  const uniquePeople = new Set(rows.map(personId));
+
+  return {
+    rows,
+    years,
+    startYear: years.length ? years[0] : null,
+    endYear: years.length ? years[years.length - 1] : null,
+    entryCount: rows.length,
+    uniquePeopleCount: uniquePeople.size,
+    organizationsCount: organizations.length,
+    positionsCount: positions.length,
+    regions,
+    regionCount: regions.length
+  };
+}
+
+function buildConferenceSegments(years){
+  const sorted = Array.from(new Set(years.filter(Number.isFinite))).sort((a,b)=>a-b);
+  if (!sorted.length) return [];
+
+  const segments = [];
+  let start = sorted[0];
+  let prev = sorted[0];
+  let currentYears = [sorted[0]];
+
+  for (let i = 1; i < sorted.length; i += 1){
+    const year = sorted[i];
+    if (year === prev + 1){
+      prev = year;
+      currentYears.push(year);
+      continue;
+    }
+
+    segments.push({ startYear: start, endYear: prev, years: currentYears.slice() });
+    start = year;
+    prev = year;
+    currentYears = [year];
+  }
+
+  segments.push({ startYear: start, endYear: prev, years: currentYears.slice() });
+  return segments;
+}
+
+function buildConferenceGroupLabel(summary){
+  const yearsLabel = formatYearRange(summary.startYear, summary.endYear);
+  const metaBits = [yearsLabel];
+  if (summary.organizationsCount) metaBits.push(`${summary.organizationsCount} orgs`);
+  if (summary.uniquePeopleCount) metaBits.push(`${summary.uniquePeopleCount} people`);
+
+  return `
+    <div class="timelineGroup">
+      <div class="timelineGroup__title">${escapeHtml(summary.conference)}</div>
+      <div class="timelineGroup__meta">${escapeHtml(metaBits.join(" • "))}</div>
+    </div>
+  `;
+}
+
+function buildConferenceSegmentContent(segmentSummary){
+  const yearsLabel = formatYearRange(segmentSummary.startYear, segmentSummary.endYear);
+  const badge = segmentSummary.state === "return" ? "Returns" : "Starts";
+  return `
+    <div class="confSegment">
+      <span class="confSegment__range">${escapeHtml(yearsLabel)}</span>
+      <span class="confSegment__badge">${escapeHtml(badge)}</span>
+    </div>
+  `;
+}
+
+function buildConferenceTooltip(summary, segmentSummary){
+  const lines = [
+    summary.conference,
+    `Span: ${formatYearRange(segmentSummary.startYear, segmentSummary.endYear)}`,
+    `${segmentSummary.organizationsCount} organizations • ${segmentSummary.uniquePeopleCount} people`,
+    `${segmentSummary.positionsCount} positions • ${segmentSummary.entryCount} rows`,
+  ];
+
+  if (segmentSummary.regions.length){
+    lines.push(`Regions: ${segmentSummary.regions.join(", ")}`);
+  }
+
+  lines.push("Click to drill into organizations and individuals.");
+  return lines.join("\n");
+}
+
+function buildConferenceTimeline(rows){
+  const byConference = new Map();
+
+  for (const row of rows){
+    const conference = safe(row.conference) || "(No conference)";
+    if (!byConference.has(conference)) byConference.set(conference, []);
+    byConference.get(conference).push(row);
+  }
+
+  const summaries = Array.from(byConference.entries())
+    .map(([conference, conferenceRows]) => {
+      const base = summarizeRowCollection(conferenceRows);
+      const segments = buildConferenceSegments(base.years).map((segment, segmentIndex) => {
+        const segmentRows = conferenceRows.filter(row => {
+          const year = Number(row.yearbook_year);
+          return Number.isFinite(year) && year >= segment.startYear && year <= segment.endYear;
+        });
+        return {
+          ...summarizeRowCollection(segmentRows),
+          ...segment,
+          rows: segmentRows,
+          state: segmentIndex === 0 ? "start" : "return",
+          segmentIndex,
+        };
+      });
+
+      return {
+        conference,
+        ...base,
+        rows: conferenceRows,
+        segments,
+      };
+    })
+    .sort((a,b) => {
+      const ay = Number.isFinite(a.startYear) ? a.startYear : 9999;
+      const by = Number.isFinite(b.startYear) ? b.startYear : 9999;
+      return ay - by || a.conference.localeCompare(b.conference);
+    });
+
+  const groups = summaries.map(summary => ({
+    id: summary.conference,
+    content: buildConferenceGroupLabel(summary),
+    title: `${summary.conference}\n${formatYearRange(summary.startYear, summary.endYear)}\n${summary.organizationsCount} organizations • ${summary.uniquePeopleCount} people`
+  }));
+
+  const timelineItems = [];
+  for (const summary of summaries){
+    for (const segment of summary.segments){
+      timelineItems.push({
+        id: `conference:${summary.conference}:${segment.startYear}-${segment.endYear}:${segment.segmentIndex}`,
+        content: buildConferenceSegmentContent(segment),
+        start: yearToDate(segment.startYear),
+        end: yearToEndDate(segment.endYear),
+        type: "range",
+        group: summary.conference,
+        title: buildConferenceTooltip(summary, segment),
+        className: `conference-segment conference-segment--${segment.state} ${segment.startYear === segment.endYear ? "conference-segment--single" : "conference-segment--multi"}`,
+        _conferenceSummary: summary,
+        _segmentSummary: segment,
+      });
+    }
+  }
+
+  const allYears = uniqueFiniteYears(rows);
+  return {
+    groups,
+    items: timelineItems,
+    conferenceCount: summaries.length,
+    segmentCount: timelineItems.length,
+    minYear: allYears.length ? allYears[0] : null,
+    maxYear: allYears.length ? allYears[allYears.length - 1] : null,
+  };
+}
+
+function setStats(view = lastConferenceView){
   const loaded = allRows.length;
-  const shown = lastFiltered.length;
-  const years = Array.from(enabledYears).sort((a,b)=>a-b);
-  const yearLabel = years.length ? `${years[0]}–${years[years.length-1]}` : "–";
-  els.statLoaded.textContent = `Loaded: ${loaded.toLocaleString()} rows`;
-  els.statShown.textContent = `Shown: ${shown.toLocaleString()} rows`;
+  const shownConferences = view?.conferenceCount || 0;
+  const shownSegments = view?.segmentCount || 0;
+  const minYear = view?.minYear;
+  const maxYear = view?.maxYear;
+  const fallbackYears = uniqueFiniteYears(allRows);
+  const yearLabel = Number.isFinite(minYear) && Number.isFinite(maxYear)
+    ? formatYearRange(minYear, maxYear)
+    : fallbackYears.length
+      ? formatYearRange(fallbackYears[0], fallbackYears[fallbackYears.length - 1])
+      : "–";
+
+  const loadSuffix = datasetLoadIssues.length ? ` • skipped ${datasetLoadIssues.length}` : "";
+  els.statLoaded.textContent = `Loaded: ${loaded.toLocaleString()} rows${loadSuffix}`;
+  els.statShown.textContent = `Shown: ${shownConferences.toLocaleString()} conferences • ${shownSegments.toLocaleString()} spans`;
   els.statYears.textContent = `Years: ${yearLabel}`;
 }
 
@@ -72,13 +258,8 @@ function hydrateFilterOptions(){
   const confs = uniqSorted(allRows.map(r => r.conference));
   const positions = uniqSorted(allRows.map(r => r.position));
   const genders = uniqSorted(allRows.map(r => r.gender));
-  const orgs = uniqSorted(
-    allRows
-      .map(r => safe(r.organization) || safe(r.institution_name))
-      .filter(v => safe(v))
-  );
+  const orgs = uniqSorted(allRows.map(organizationLabel));
 
-  // Preserve current selection when possible
   const prevRegion = els.regionSelect.value;
   const prevConf = els.confSelect.value;
   const prevPos = els.positionSelect?.value || "";
@@ -118,16 +299,10 @@ function hydrateFilterOptions(){
   if (els.orgSelect && orgs.includes(prevOrg)) els.orgSelect.value = prevOrg;
 }
 
-function escapeHtml(str){
-  return String(str)
-    .replaceAll("&","&amp;")
-    .replaceAll("<","&lt;")
-    .replaceAll(">","&gt;")
-    .replaceAll('"',"&quot;")
-    .replaceAll("'","&#039;");
-}
-
 function applyFilters(){
+  closeOrganizationModal();
+  closeConferenceModal();
+
   const q = safe(els.searchInput.value).toLowerCase();
   const region = safe(els.regionSelect.value);
   const conf = safe(els.confSelect.value);
@@ -137,93 +312,335 @@ function applyFilters(){
   const yMin = Number(els.yearMin.value || 0);
   const yMax = Number(els.yearMax.value || 9999);
 
-  const filtered = allRows.filter(r => {
-    const y = Number(r.yearbook_year);
-    if (Number.isFinite(yMin) && y < yMin) return false;
-    if (Number.isFinite(yMax) && y > yMax) return false;
+  const filtered = allRows.filter(row => {
+    const year = Number(row.yearbook_year);
+    if (Number.isFinite(yMin) && year < yMin) return false;
+    if (Number.isFinite(yMax) && year > yMax) return false;
 
     if (q){
-      const nm = safe(r.name).toLowerCase();
-      const ln = safe(r.last_name).toLowerCase();
-      if (!nm.includes(q) && !ln.includes(q)) return false;
+      const haystack = [
+        personDisplayName(row),
+        safe(row.last_name),
+        safe(row.conference),
+        organizationLabel(row),
+        safe(row.position),
+        safe(row.region),
+        safe(row.location),
+        safe(row.institution_name),
+      ].join(" ").toLowerCase();
+      if (!haystack.includes(q)) return false;
     }
 
-    if (region && safe(r.region) !== region) return false;
-    if (conf && safe(r.conference) !== conf) return false;
-
-    if (pos && safe(r.position) !== pos) return false;
-    if (gender && safe(r.gender) !== gender) return false;
-
-    if (orgSel){
-      const orgLabel = safe(r.organization) || safe(r.institution_name);
-      if (safe(orgLabel) !== orgSel) return false;
-    }
+    if (region && safe(row.region) !== region) return false;
+    if (conf && safe(row.conference) !== conf) return false;
+    if (pos && safe(row.position) !== pos) return false;
+    if (gender && safe(row.gender) !== gender) return false;
+    if (orgSel && organizationLabel(row) !== orgSel) return false;
 
     return true;
   });
 
   lastFiltered = filtered;
+  selectedConferenceItem = null;
 
-  const itemObjs = filtered.map((r, i) => rowToItem(r, i));
+  const conferenceView = buildConferenceTimeline(filtered);
+  lastConferenceView = conferenceView;
+
   items.clear();
-  items.add(itemObjs);
+  items.add(conferenceView.items);
 
-  const groupNames = uniqSorted(itemObjs.map(it => it.group));
-  const groups = groupNames.map(g => ({ id: g, content: g }));
-  timeline.setGroups(groups);
+  groupsData = new vis.DataSet(conferenceView.groups);
+  timeline.setGroups(groupsData);
 
-  setStats();
+  setStats(conferenceView);
+  renderDetail(null);
+
+  if (conferenceView.minYear !== null && conferenceView.maxYear !== null){
+    const start = new Date(conferenceView.minYear - 1, 0, 1);
+    const end = new Date(conferenceView.maxYear + 1, 0, 1);
+    timeline.setWindow(start, end, { animation: false });
+  }
 }
 
 function resetFilters(){
+  const manifestYears = Array.isArray(manifest?.datasets)
+    ? manifest.datasets.map(d => Number(d.year)).filter(Number.isFinite).sort((a,b)=>a-b)
+    : [];
+
   els.searchInput.value = "";
   els.regionSelect.value = "";
   els.confSelect.value = "";
   if (els.positionSelect) els.positionSelect.value = "";
   if (els.genderSelect) els.genderSelect.value = "";
   if (els.orgSelect) els.orgSelect.value = "";
-  els.yearMin.value = "1883";
-  els.yearMax.value = "1921";
+  els.yearMin.value = manifestYears.length ? String(manifestYears[0]) : "1883";
+  els.yearMax.value = manifestYears.length ? String(manifestYears[manifestYears.length - 1]) : "1921";
   applyFilters();
 }
 
-function renderDetail(row){
-  if (!row){
+function renderDetail(item){
+  if (!item){
     els.detailCard.classList.add("muted");
-    els.detailCard.textContent = "Click a point on the timeline to see details here.";
+    els.detailCard.textContent = "Click a conference span on the timeline to open organizations and individuals.";
     return;
   }
+
+  const summary = item._conferenceSummary;
+  const segment = item._segmentSummary;
+  if (!summary || !segment){
+    els.detailCard.classList.add("muted");
+    els.detailCard.textContent = "Click a conference span on the timeline to open organizations and individuals.";
+    return;
+  }
+
   els.detailCard.classList.remove("muted");
 
-  const name = safe(row.name) || "(unknown)";
-  const year = safe(row.yearbook_year);
-  const page = safe(row.page);
-
   const fields = [
-    ["Year", year],
-    ["Page", page],
-    ["Prefix", safe(row.prefix)],
-    ["Last name", safe(row.last_name)],
-    ["Suffix", safe(row.suffix)],
-    ["Gender", safe(row.gender)],
-    ["Position", safe(row.position)],
-    ["Pos. info", safe(row.position_information)],
-    ["Organization", safe(row.organization)],
-    ["Group", safe(row.group)],
-    ["Conference", safe(row.conference)],
-    ["Institution", safe(row.institution_name)],
-    ["Location", safe(row.location)],
-    ["Region", safe(row.region)],
-  ].filter(([k,v]) => safe(v));
+    ["Conference", summary.conference],
+    ["Span", formatYearRange(segment.startYear, segment.endYear)],
+    ["Active years", `${segment.years.length}`],
+    ["Organizations", `${segment.organizationsCount}`],
+    ["Unique people", `${segment.uniquePeopleCount}`],
+    ["Positions", `${segment.positionsCount}`],
+    ["Regions", segment.regions.join(", ")],
+    ["Rows", `${segment.entryCount}`],
+  ].filter(([,value]) => safe(value));
 
   els.detailCard.innerHTML = `
-    <div style="font-weight:750; font-size:14px;">${escapeHtml(name)}</div>
+    <div style="font-weight:750; font-size:14px;">${escapeHtml(summary.conference)}</div>
     <div class="kv">
       ${fields.map(([k,v]) => `<div class="k">${escapeHtml(k)}</div><div class="v">${escapeHtml(v)}</div>`).join("")}
+    </div>
+    <div style="margin-top:12px; display:flex; justify-content:flex-end;">
+      <button class="btn btn--primary" type="button" data-open-conference>Open drill-down</button>
+    </div>
+  `;
+
+  const btn = els.detailCard.querySelector('[data-open-conference]');
+  if (btn){
+    btn.addEventListener('click', () => openConferenceModal(item));
+  }
+}
+
+function buildStatCard(label, value, hint = ""){
+  return `
+    <div class="miniStat">
+      <div class="miniStat__label">${escapeHtml(label)}</div>
+      <div class="miniStat__value">${escapeHtml(String(value))}</div>
+      ${hint ? `<div class="miniStat__hint">${escapeHtml(hint)}</div>` : ""}
     </div>
   `;
 }
 
+function summarizeOrganizationRows(rows, conferenceName, orgName){
+  const years = uniqueFiniteYears(rows);
+  const positions = uniqSorted(rows.map(r => safe(r.position)));
+  const locations = uniqSorted(rows.map(r => safe(r.location)));
+  const peopleSeen = new Set();
+  const byYear = new Map();
+
+  for (const row of rows){
+    const year = Number(row.yearbook_year);
+    const yearKey = Number.isFinite(year) ? year : "Unknown";
+    if (!byYear.has(yearKey)) byYear.set(yearKey, new Map());
+
+    const personKey = personId(row);
+    peopleSeen.add(personKey);
+
+    const yearMap = byYear.get(yearKey);
+    if (!yearMap.has(personKey)){
+      yearMap.set(personKey, {
+        id: personKey,
+        name: personDisplayName(row),
+        positions: new Set(),
+        locations: new Set(),
+        pages: new Set(),
+        genders: new Set(),
+        notes: new Set(),
+      });
+    }
+
+    const person = yearMap.get(personKey);
+    if (safe(row.position)) person.positions.add(safe(row.position));
+    if (safe(row.location)) person.locations.add(safe(row.location));
+    if (safe(row.page)) person.pages.add(String(row.page));
+    if (safe(row.gender)) person.genders.add(safe(row.gender));
+    if (safe(row.position_information)) person.notes.add(safe(row.position_information));
+  }
+
+  const peopleByYear = Array.from(byYear.entries())
+    .sort((a,b) => {
+      const ay = typeof a[0] === 'number' ? a[0] : 9999;
+      const by = typeof b[0] === 'number' ? b[0] : 9999;
+      return ay - by || String(a[0]).localeCompare(String(b[0]));
+    })
+    .map(([year, peopleMap]) => ({
+      year,
+      people: Array.from(peopleMap.values())
+        .map(person => ({
+          ...person,
+          positions: Array.from(person.positions).sort((a,b)=>a.localeCompare(b)),
+          locations: Array.from(person.locations).sort((a,b)=>a.localeCompare(b)),
+          pages: Array.from(person.pages).sort((a,b)=>Number(a) - Number(b)),
+          genders: Array.from(person.genders).sort((a,b)=>a.localeCompare(b)),
+          notes: Array.from(person.notes).sort((a,b)=>a.localeCompare(b)),
+        }))
+        .sort((a,b)=>a.name.localeCompare(b.name))
+    }));
+
+  return {
+    conference: conferenceName,
+    organization: orgName,
+    rows,
+    years,
+    startYear: years.length ? years[0] : null,
+    endYear: years.length ? years[years.length - 1] : null,
+    entryCount: rows.length,
+    uniquePeopleCount: peopleSeen.size,
+    positionsCount: positions.length,
+    locationCount: locations.length,
+    positions,
+    peopleByYear,
+  };
+}
+
+function buildOrganizationSummaries(rows, conferenceName){
+  const byOrg = new Map();
+  for (const row of rows){
+    const org = organizationLabel(row);
+    if (!byOrg.has(org)) byOrg.set(org, []);
+    byOrg.get(org).push(row);
+  }
+
+  return Array.from(byOrg.entries())
+    .map(([orgName, orgRows]) => summarizeOrganizationRows(orgRows, conferenceName, orgName))
+    .sort((a,b) => a.organization.localeCompare(b.organization));
+}
+
+function buildConferenceSelectionContext(item){
+  const conferenceSummary = item?._conferenceSummary;
+  const segmentSummary = item?._segmentSummary;
+  if (!conferenceSummary || !segmentSummary) return null;
+
+  const organizations = buildOrganizationSummaries(segmentSummary.rows, conferenceSummary.conference);
+  return {
+    item,
+    conference: conferenceSummary.conference,
+    conferenceSummary,
+    segmentSummary,
+    rows: segmentSummary.rows,
+    years: segmentSummary.years,
+    organizations,
+  };
+}
+
+function renderConferenceModal(context){
+  if (!context || !els.conferenceModal) return;
+
+  const { conference, segmentSummary, years, organizations } = context;
+  els.conferenceModalTitle.textContent = conference;
+  els.conferenceModalSubtitle.textContent = `${formatYearRange(segmentSummary.startYear, segmentSummary.endYear)} • ${organizations.length} organizations • ${segmentSummary.uniquePeopleCount} people`;
+
+  els.conferenceStatGrid.innerHTML = [
+    buildStatCard('Active span', formatYearRange(segmentSummary.startYear, segmentSummary.endYear), segmentSummary.state === 'return' ? 'Conference returns after a gap' : 'Conference first span in current view'),
+    buildStatCard('Active years', segmentSummary.years.length),
+    buildStatCard('Organizations', segmentSummary.organizationsCount),
+    buildStatCard('Unique people', segmentSummary.uniquePeopleCount),
+    buildStatCard('Positions', segmentSummary.positionsCount),
+    buildStatCard('Regions', segmentSummary.regionCount || '—', segmentSummary.regions.join(', ') || 'No region labels')
+  ].join('');
+
+  els.conferenceYears.innerHTML = years.length
+    ? years.map(year => `<span class="chip">${escapeHtml(String(year))}</span>`).join('')
+    : '<div class="emptyState">No active years in this conference span.</div>';
+
+  els.conferenceOrgList.innerHTML = organizations.length
+    ? organizations.map((org, index) => `
+        <button class="orgCard" type="button" data-org-index="${index}">
+          <div class="orgCard__name">${escapeHtml(org.organization)}</div>
+          <div class="orgCard__meta">
+            <span>${escapeHtml(formatYearRange(org.startYear, org.endYear))}</span>
+            <span>${org.uniquePeopleCount.toLocaleString()} people</span>
+            <span>${org.positionsCount.toLocaleString()} positions</span>
+          </div>
+        </button>
+      `).join('')
+    : '<div class="emptyState">No organizations matched the current filters for this conference span.</div>';
+}
+
+function openConferenceModal(item){
+  if (!els.conferenceModal || !item) return;
+  selectedConferenceItem = item;
+  selectedConferenceContext = buildConferenceSelectionContext(item);
+  selectedOrganizationContext = null;
+  renderConferenceModal(selectedConferenceContext);
+  els.conferenceModal.setAttribute('aria-hidden', 'false');
+}
+
+function closeConferenceModal(){
+  if (!els.conferenceModal) return;
+  closeOrganizationModal();
+  els.conferenceModal.setAttribute('aria-hidden', 'true');
+  selectedConferenceContext = null;
+  selectedOrganizationContext = null;
+}
+
+function renderOrganizationModal(orgSummary){
+  if (!orgSummary || !els.organizationModal) return;
+
+  els.organizationModalTitle.textContent = orgSummary.organization;
+  els.organizationModalSubtitle.textContent = `${orgSummary.conference} • ${formatYearRange(orgSummary.startYear, orgSummary.endYear)} • ${orgSummary.uniquePeopleCount} people`;
+
+  els.organizationStatGrid.innerHTML = [
+    buildStatCard('Active span', formatYearRange(orgSummary.startYear, orgSummary.endYear)),
+    buildStatCard('Unique people', orgSummary.uniquePeopleCount),
+    buildStatCard('Positions', orgSummary.positionsCount),
+    buildStatCard('Locations', orgSummary.locationCount || '—'),
+    buildStatCard('Rows', orgSummary.entryCount),
+    buildStatCard('Years', orgSummary.years.length || '—')
+  ].join('');
+
+  els.organizationPeopleList.innerHTML = orgSummary.peopleByYear.length
+    ? orgSummary.peopleByYear.map(yearBlock => `
+        <section class="yearBlock">
+          <div class="yearBlock__header">
+            <span>${escapeHtml(String(yearBlock.year))}</span>
+            <span>${yearBlock.people.length.toLocaleString()} people</span>
+          </div>
+          <div class="personGrid">
+            ${yearBlock.people.map(person => {
+              const note = person.notes.find(Boolean) || '';
+              const trimmedNote = note.length > 140 ? `${note.slice(0, 137)}…` : note;
+              return `
+                <article class="personCard">
+                  <div class="personCard__name">${escapeHtml(person.name)}</div>
+                  <div class="personCard__meta">${escapeHtml(person.positions.join(' • ') || 'No position listed')}</div>
+                  ${person.locations.length ? `<div class="personCard__sub">${escapeHtml(person.locations.join(' • '))}</div>` : ''}
+                  ${person.pages.length ? `<div class="personCard__sub">Page ${escapeHtml(person.pages.join(', '))}</div>` : ''}
+                  ${trimmedNote ? `<div class="personCard__note">${escapeHtml(trimmedNote)}</div>` : ''}
+                </article>
+              `;
+            }).join('')}
+          </div>
+        </section>
+      `).join('')
+    : '<div class="emptyState">No individuals matched the current filters for this organization.</div>';
+}
+
+function openOrganizationModalByIndex(index){
+  if (!selectedConferenceContext || !els.organizationModal) return;
+  const orgSummary = selectedConferenceContext.organizations[index];
+  if (!orgSummary) return;
+  selectedOrganizationContext = orgSummary;
+  renderOrganizationModal(orgSummary);
+  els.organizationModal.setAttribute('aria-hidden', 'false');
+}
+
+function closeOrganizationModal(){
+  if (!els.organizationModal) return;
+  els.organizationModal.setAttribute('aria-hidden', 'true');
+  selectedOrganizationContext = null;
+}
 
 function openHierarchy(){
   els.hierarchyModal.setAttribute("aria-hidden", "false");
@@ -571,16 +988,15 @@ async function loadManifest(){
   return res.json();
 }
 
-function loadCsv(file){
-  return new Promise((resolve, reject) => {
-    Papa.parse(file, {
-      download: true,
-      header: true,
-      skipEmptyLines: true,
-      complete: (results) => resolve(results.data),
-      error: (err) => reject(err)
-    });
+async function loadCsv(file){
+  const res = await fetch(file);
+  if (!res.ok) throw new Error(`Could not load ${file}`);
+  const csvText = await res.text();
+  const parsed = Papa.parse(csvText, {
+    header: true,
+    skipEmptyLines: true,
   });
+  return parsed.data || [];
 }
 
 function normalizeRow(r, year){
@@ -595,19 +1011,30 @@ function normalizeRow(r, year){
 
 async function reloadAllEnabled(){
   allRows = [];
+  datasetLoadIssues = [];
+  datasetStatus = new Map();
+
   const enabled = manifest.datasets.filter(d => enabledYears.has(d.year));
-  const loads = enabled.map(async d => {
-    const rows = await loadCsv(d.file);
-    return rows.map(r => normalizeRow(r, d.year));
-  });
+  const results = await Promise.all(enabled.map(async dataset => {
+    try {
+      const rows = await loadCsv(dataset.file);
+      const normalized = rows.map(row => normalizeRow(row, dataset.year));
+      datasetStatus.set(dataset.year, { status: 'loaded', rows: normalized.length });
+      return normalized;
+    } catch (err) {
+      console.warn(`Skipping dataset ${dataset.year}:`, err);
+      datasetLoadIssues.push({ year: dataset.year, file: dataset.file, message: err?.message || String(err) });
+      datasetStatus.set(dataset.year, { status: 'error', message: err?.message || String(err) });
+      return [];
+    }
+  }));
 
-  const chunks = await Promise.all(loads);
-  allRows = chunks.flat();
+  allRows = results.flat();
 
+  renderDatasetList();
   hydrateFilterOptions();
   applyFilters();
 
-  // If hierarchy modal is open, refresh its conference list
   if (els.hierarchyModal && els.hierarchyModal.getAttribute('aria-hidden') === 'false'){
     const keep = els.hierarchyConferenceSelect.value;
     openHierarchy();
@@ -619,11 +1046,21 @@ async function reloadAllEnabled(){
 function renderDatasetList(){
   const html = manifest.datasets.map(ds => {
     const on = enabledYears.has(ds.year);
+    const status = datasetStatus.get(ds.year);
+    const statusLabel = !on
+      ? 'disabled'
+      : status?.status === 'loaded'
+        ? `${status.rows.toLocaleString()} rows`
+        : status?.status === 'error'
+          ? 'unavailable'
+          : 'pending';
+    const extraClass = status?.status === 'error' ? ' datasetPill--error' : '';
+
     return `
-      <div class="datasetPill" data-year="${ds.year}">
+      <div class="datasetPill${extraClass}" data-year="${ds.year}">
         <div class="datasetPill__left">
           <div class="datasetPill__title">${escapeHtml(ds.label || String(ds.year))}</div>
-          <div class="datasetPill__meta">${escapeHtml(ds.file)}</div>
+          <div class="datasetPill__meta">${escapeHtml(ds.file)} • ${escapeHtml(statusLabel)}</div>
         </div>
         <div class="datasetPill__right">
           <span class="toggle" aria-label="toggle">${on ? "✓" : ""}</span>
@@ -634,11 +1071,11 @@ function renderDatasetList(){
 
   els.datasetList.innerHTML = html;
 
-  els.datasetList.querySelectorAll(".datasetPill").forEach(el => {
-    el.addEventListener("click", async () => {
-      const y = Number(el.getAttribute("data-year"));
-      if (enabledYears.has(y)) enabledYears.delete(y);
-      else enabledYears.add(y);
+  els.datasetList.querySelectorAll('.datasetPill').forEach(el => {
+    el.addEventListener('click', async () => {
+      const year = Number(el.getAttribute('data-year'));
+      if (enabledYears.has(year)) enabledYears.delete(year);
+      else enabledYears.add(year);
 
       renderDatasetList();
       await reloadAllEnabled();
@@ -650,107 +1087,157 @@ function initTimeline(){
   const container = els.timeline;
 
   items = new vis.DataSet([]);
-  const groups = new vis.DataSet([]);
+  groupsData = new vis.DataSet([]);
 
   const options = {
-    stack: true,
-    maxHeight: "640px",
-    zoomMin: 1000 * 60 * 60 * 24 * 365 * 0.8,    // ~0.8 year
-    zoomMax: 1000 * 60 * 60 * 24 * 365 * 200,    // ~200 years
+    stack: false,
+    maxHeight: '640px',
+    zoomMin: 1000 * 60 * 60 * 24 * 365 * 0.8,
+    zoomMax: 1000 * 60 * 60 * 24 * 365 * 200,
     horizontalScroll: true,
     verticalScroll: true,
-    zoomKey: "ctrlKey",
-    margin: { item: 10, axis: 10 },
+    zoomKey: 'ctrlKey',
+    multiselect: false,
+    showCurrentTime: false,
+    margin: { item: { horizontal: 10, vertical: 8 }, axis: 10 },
     tooltip: { followMouse: true },
   };
 
-  timeline = new vis.Timeline(container, items, groups, options);
+  timeline = new vis.Timeline(container, items, groupsData, options);
 
-  timeline.on("select", (props) => {
+  timeline.on('select', props => {
     const id = props.items && props.items[0];
-    if (!id) return renderDetail(null);
-    const it = items.get(id);
-    renderDetail(it?._row || null);
+    if (!id){
+      selectedConferenceItem = null;
+      return renderDetail(null);
+    }
+
+    const item = items.get(id);
+    selectedConferenceItem = item || null;
+    renderDetail(item || null);
+    if (item) openConferenceModal(item);
   });
 
-  // Start centered around earliest year
   const start = new Date(1880, 0, 1);
   const end = new Date(1890, 0, 1);
   timeline.setWindow(start, end, { animation: false });
 }
 
 async function main(){
-  els.datasetList = $("datasetList");
-  els.searchInput = $("searchInput");
-  els.regionSelect = $("regionSelect");
-  els.confSelect = $("confSelect");
-  els.positionSelect = $("positionSelect");
-els.genderSelect = $("genderSelect");
-els.orgSelect = $("orgSelect");
-  els.yearMin = $("yearMin");
-  els.yearMax = $("yearMax");
-  els.applyBtn = $("applyBtn");
-  els.resetBtn = $("resetBtn");
-  els.detailCard = $("detailCard");
-  els.hierarchyBtn = $("hierarchyBtn");
-  els.exportBtn = $("exportBtn");
-  els.hierarchyModal = $("hierarchyModal");
-  els.hierarchyBackdrop = $("hierarchyBackdrop");
-  els.hierarchyCloseBtn = $("hierarchyCloseBtn");
-  els.hierarchyConferenceSelect = $("hierarchyConferenceSelect");
-  els.hierarchyGroupingSelect = $("hierarchyGroupingSelect");
-  els.hierarchyChart = $("hierarchyChart");
-  els.hierarchyDetail = $("hierarchyDetail");
+  els.datasetList = $('datasetList');
+  els.searchInput = $('searchInput');
+  els.regionSelect = $('regionSelect');
+  els.confSelect = $('confSelect');
+  els.positionSelect = $('positionSelect');
+  els.genderSelect = $('genderSelect');
+  els.orgSelect = $('orgSelect');
+  els.yearMin = $('yearMin');
+  els.yearMax = $('yearMax');
+  els.applyBtn = $('applyBtn');
+  els.resetBtn = $('resetBtn');
+  els.detailCard = $('detailCard');
+  els.hierarchyBtn = $('hierarchyBtn');
+  els.exportBtn = $('exportBtn');
+  els.hierarchyModal = $('hierarchyModal');
+  els.hierarchyBackdrop = $('hierarchyBackdrop');
+  els.hierarchyCloseBtn = $('hierarchyCloseBtn');
+  els.hierarchyConferenceSelect = $('hierarchyConferenceSelect');
+  els.hierarchyGroupingSelect = $('hierarchyGroupingSelect');
+  els.hierarchyChart = $('hierarchyChart');
+  els.hierarchyDetail = $('hierarchyDetail');
+  els.conferenceModal = $('conferenceModal');
+  els.conferenceBackdrop = $('conferenceBackdrop');
+  els.conferenceCloseBtn = $('conferenceCloseBtn');
+  els.conferenceModalTitle = $('conferenceModalTitle');
+  els.conferenceModalSubtitle = $('conferenceModalSubtitle');
+  els.conferenceStatGrid = $('conferenceStatGrid');
+  els.conferenceYears = $('conferenceYears');
+  els.conferenceOrgList = $('conferenceOrgList');
+  els.organizationModal = $('organizationModal');
+  els.organizationBackdrop = $('organizationBackdrop');
+  els.organizationBackBtn = $('organizationBackBtn');
+  els.organizationCloseBtn = $('organizationCloseBtn');
+  els.organizationModalTitle = $('organizationModalTitle');
+  els.organizationModalSubtitle = $('organizationModalSubtitle');
+  els.organizationStatGrid = $('organizationStatGrid');
+  els.organizationPeopleList = $('organizationPeopleList');
 
-  els.statLoaded = $("statLoaded");
-  els.statShown = $("statShown");
-  els.statYears = $("statYears");
-  els.timeline = $("timeline");
+  els.statLoaded = $('statLoaded');
+  els.statShown = $('statShown');
+  els.statYears = $('statYears');
+  els.timeline = $('timeline');
 
   initTimeline();
 
   manifest = await loadManifest();
 
-  // Enable all datasets by default
+  const manifestYears = Array.isArray(manifest?.datasets)
+    ? manifest.datasets.map(d => Number(d.year)).filter(Number.isFinite).sort((a,b)=>a-b)
+    : [];
+  if (manifestYears.length){
+    els.yearMin.value = String(manifestYears[0]);
+    els.yearMax.value = String(manifestYears[manifestYears.length - 1]);
+    els.yearMin.min = String(manifestYears[0]);
+    els.yearMin.max = String(manifestYears[manifestYears.length - 1]);
+    els.yearMax.min = String(manifestYears[0]);
+    els.yearMax.max = String(manifestYears[manifestYears.length - 1]);
+  }
+
   enabledYears = new Set(manifest.datasets.map(d => d.year));
 
   renderDatasetList();
   await reloadAllEnabled();
 
-  els.applyBtn.addEventListener("click", applyFilters);
-  els.resetBtn.addEventListener("click", resetFilters);
+  els.applyBtn.addEventListener('click', applyFilters);
+  els.resetBtn.addEventListener('click', resetFilters);
 
-  els.hierarchyBtn.addEventListener("click", (e) => {
+  els.hierarchyBtn.addEventListener('click', e => {
     e.preventDefault();
     openHierarchy();
   });
 
-  els.hierarchyBackdrop.addEventListener("click", closeHierarchy);
-  els.hierarchyCloseBtn.addEventListener("click", closeHierarchy);
-  els.hierarchyConferenceSelect.addEventListener("change", () => {
-    const c = safe(els.hierarchyConferenceSelect.value);
-    if (!c) return clearHierarchy();
-    renderHierarchyForConference(c);
+  els.hierarchyBackdrop.addEventListener('click', closeHierarchy);
+  els.hierarchyCloseBtn.addEventListener('click', closeHierarchy);
+  els.hierarchyConferenceSelect.addEventListener('change', () => {
+    const conference = safe(els.hierarchyConferenceSelect.value);
+    if (!conference) return clearHierarchy();
+    renderHierarchyForConference(conference);
   });
 
-  els.hierarchyGroupingSelect.addEventListener("change", () => {
-    const c = safe(els.hierarchyConferenceSelect.value);
-    if (!c) return;
-    renderHierarchyForConference(c);
+  els.hierarchyGroupingSelect.addEventListener('change', () => {
+    const conference = safe(els.hierarchyConferenceSelect.value);
+    if (!conference) return;
+    renderHierarchyForConference(conference);
   });
 
-  window.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && els.hierarchyModal.getAttribute("aria-hidden") === "false") closeHierarchy();
-  });
-
-  els.exportBtn.addEventListener("click", (e) => {
+  els.exportBtn.addEventListener('click', e => {
     e.preventDefault();
     exportView();
   });
 
-  // Small UX: apply filters on enter in search
-  els.searchInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") applyFilters();
+  if (els.conferenceBackdrop) els.conferenceBackdrop.addEventListener('click', closeConferenceModal);
+  if (els.conferenceCloseBtn) els.conferenceCloseBtn.addEventListener('click', closeConferenceModal);
+  if (els.conferenceOrgList){
+    els.conferenceOrgList.addEventListener('click', event => {
+      const card = event.target.closest('[data-org-index]');
+      if (!card) return;
+      openOrganizationModalByIndex(Number(card.getAttribute('data-org-index')));
+    });
+  }
+
+  if (els.organizationBackdrop) els.organizationBackdrop.addEventListener('click', closeOrganizationModal);
+  if (els.organizationBackBtn) els.organizationBackBtn.addEventListener('click', closeOrganizationModal);
+  if (els.organizationCloseBtn) els.organizationCloseBtn.addEventListener('click', closeOrganizationModal);
+
+  window.addEventListener('keydown', e => {
+    if (e.key !== 'Escape') return;
+    if (els.organizationModal?.getAttribute('aria-hidden') === 'false') return closeOrganizationModal();
+    if (els.conferenceModal?.getAttribute('aria-hidden') === 'false') return closeConferenceModal();
+    if (els.hierarchyModal?.getAttribute('aria-hidden') === 'false') return closeHierarchy();
+  });
+
+  els.searchInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter') applyFilters();
   });
 
   attachTabHandlers();

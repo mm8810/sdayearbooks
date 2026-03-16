@@ -128,8 +128,8 @@
         <h2>Filters</h2>
 
         <label class="field">
-          <span class="field__label">Search name</span>
-          <input id="searchInput" type="search" placeholder="e.g., Andrews" autocomplete="off" />
+          <span class="field__label">Search conference / organization / individual</span>
+          <input id="searchInput" type="search" placeholder="e.g., California, Andrews, or Publishing Association" autocomplete="off" />
         </label>
 
         <div class="fieldRow">
@@ -187,14 +187,14 @@
         </div>
 
         <p class="hint">
-          Tip: Click an item on the timeline to view details. Use the left-right scroll on the timeline to move through years.
+          Tip: Each row is now a conference. Continuous bars show years when that conference is active in the current filtered view; a later bar shows the conference entering or returning after a gap. Click a bar to open organizations, then click an organization to see people.
         </p>
       </section>
 
       <section class="panel__section">
         <h2>Selected</h2>
         <div id="detailCard" class="detailCard muted">
-          Click a point on the timeline to see details here.
+          Click a conference span on the timeline to open organizations and individuals.
         </div>
       </section>
     </aside>
@@ -221,6 +221,77 @@
       </div>
     </section>
   </main>
+
+
+
+
+  <!-- Conference Drill-down Modal -->
+  <div id="conferenceModal" class="modal modal--drilldown" aria-hidden="true">
+    <div class="modal__backdrop" id="conferenceBackdrop"></div>
+    <div class="modal__panel modal__panel--drilldown" role="dialog" aria-modal="true" aria-label="Conference details">
+      <div class="modal__header">
+        <div>
+          <div class="modal__title" id="conferenceModalTitle">Conference details</div>
+          <div class="modal__subtitle" id="conferenceModalSubtitle">Organizations and individuals in the selected span</div>
+        </div>
+        <div class="modal__actions">
+          <button class="btn" id="conferenceCloseBtn" type="button">Close</button>
+        </div>
+      </div>
+
+      <div class="modal__body">
+        <div class="drillLayout">
+          <section class="drillSection">
+            <h3 class="drillHeading">Overview</h3>
+            <div class="statgrid" id="conferenceStatGrid"></div>
+            <div class="chiprow" id="conferenceYears"></div>
+          </section>
+
+          <section class="drillSection drillSection--scroll">
+            <div class="drillSection__top">
+              <h3 class="drillHeading">Organizations</h3>
+              <div class="hint">Click an organization to open the people panel.</div>
+            </div>
+            <div class="orgList" id="conferenceOrgList"></div>
+          </section>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Organization Drill-down Modal -->
+  <div id="organizationModal" class="modal modal--drilldown modal--nested" aria-hidden="true">
+    <div class="modal__backdrop" id="organizationBackdrop"></div>
+    <div class="modal__panel modal__panel--drilldown modal__panel--nested" role="dialog" aria-modal="true" aria-label="Organization details">
+      <div class="modal__header">
+        <div>
+          <div class="modal__title" id="organizationModalTitle">Organization details</div>
+          <div class="modal__subtitle" id="organizationModalSubtitle">Individuals in the selected organization</div>
+        </div>
+        <div class="modal__actions">
+          <button class="btn" id="organizationBackBtn" type="button">Back</button>
+          <button class="btn" id="organizationCloseBtn" type="button">Close</button>
+        </div>
+      </div>
+
+      <div class="modal__body">
+        <div class="drillLayout drillLayout--single">
+          <section class="drillSection">
+            <h3 class="drillHeading">Overview</h3>
+            <div class="statgrid" id="organizationStatGrid"></div>
+          </section>
+
+          <section class="drillSection drillSection--scroll">
+            <div class="drillSection__top">
+              <h3 class="drillHeading">Individuals</h3>
+              <div class="hint">Grouped by year so you can see who appears in that organization over time.</div>
+            </div>
+            <div class="yearStack" id="organizationPeopleList"></div>
+          </section>
+        </div>
+      </div>
+    </div>
+  </div>
 
 
   <!-- Hierarchy Modal -->
