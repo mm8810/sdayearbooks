@@ -37,6 +37,24 @@
     "1893 Yearbook" },
     { "year": 1894, "file": 
     "data/1894.csv", "label": 
-    "1894 Yearbook" }
+    "1894 Yearbook" },
+    { "year": 1904, "file": 
+    "data/1904.csv", "label": 
+    "1904 Yearbook" },
+    { "year": 1905, "file": 
+    "data/1905.csv", "label": 
+    "1905 Yearbook" },
+    { "year": 1906, "file": 
+    "data/1906.csv", "label": 
+    "1906 Yearbook" },
+    { "year": 1907, "file": 
+    "data/1907.csv", "label": 
+    "1907 Yearbook" },
+    { "year": 1908, "file": 
+    "data/1908.csv", "label": 
+    "1908 Yearbook" },
+    { "year": 1909, "file": 
+    "data/1909.csv", "label": 
+    "1909 Yearbook" }      
   ]
 }
