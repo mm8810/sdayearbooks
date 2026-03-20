@@ -38,32 +38,27 @@
     </header>
 
     <main class="layout layout--summary">
-      <section class="panel">
-        <h2>Per-year totals</h2>
-        <div class="hint">“Unique individuals” are deduplicated by normalized full name (uses <code>name</code>, falls back to <code>prefix + last_name + suffix</code>).</div>
-        <div class="tablewrap">
-          <table class="table" id="perYearTable" aria-label="Per-year table">
-            <thead>
-              <tr>
-                <th>Year</th>
-                <th>Unique individuals</th>
-                <th>Conferences</th>
-                <th>Women</th>
-              </tr>
-            </thead>
-            <tbody></tbody>
-          </table>
+      <section class="panel panel--hero">
+        <div class="panel__header panel__header--split">
+          <div>
+            <h2>Women among named individuals over time</h2>
+            <div class="hint">This is the primary summary view. It uses the same live filter slice across conference, organization, role, role detail, geography, search, and year range.</div>
+          </div>
+          <div class="chartMetaRow chartMetaRow--compact">
+            <span class="statpill" id="womenPctLatest">Latest: –</span>
+            <span class="statpill" id="womenPctPeak">Peak: –</span>
+            <span class="statpill" id="womenPctAverage">Average: –</span>
+          </div>
         </div>
-      </section>
 
-      <section class="panel">
-        <h2>Drill-down</h2>
-        <div class="hint">Example: Conference = <b>California</b>, Gender = <b>female</b>, Role = <b>Secretary</b>.</div>
-
-        <div class="filters grid5">
+        <div class="gridSummary">
+          <label class="field field--summary-wide">
+            <span>Search any field</span>
+            <input id="sumSearch" type="search" placeholder="Name, conference, organization, role, location…" autocomplete="off" />
+          </label>
           <label class="field">
-            <span>Year</span>
-            <select id="sumYear"></select>
+            <span>Region</span>
+            <select id="sumRegion"></select>
           </label>
           <label class="field">
             <span>Conference</span>
@@ -74,33 +69,105 @@
             <select id="sumOrganization"></select>
           </label>
           <label class="field">
+            <span>Group</span>
+            <select id="sumGroup"></select>
+          </label>
+          <label class="field">
             <span>Role</span>
             <select id="sumRole"></select>
           </label>
+          <label class="field field--summary-wide">
+            <span>Role detail contains</span>
+            <input id="sumRoleDetail" type="search" placeholder="e.g., licensed minister" autocomplete="off" />
+          </label>
           <label class="field">
-            <span>Gender</span>
+            <span>Gender override</span>
             <select id="sumGender"></select>
+          </label>
+          <label class="field">
+            <span>Year range</span>
+            <div class="rangeRow">
+              <input id="sumYearMin" type="number" min="1800" max="2100" />
+              <span class="rangeDash">–</span>
+              <input id="sumYearMax" type="number" min="1800" max="2100" />
+            </div>
           </label>
         </div>
 
+        <div class="summaryActions">
+          <button class="btn" id="sumResetBtn" type="button">Reset summary filters</button>
+        </div>
+
+        <div id="womenPctChart" class="chartWrap chartWrap--hero" aria-live="polite"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel__header panel__header--split">
+          <div>
+            <h2>People with more than five roles over time</h2>
+            <div class="hint">For each year, this shows the percentage of unique named individuals in the filtered slice who hold more than five matching roles that year.</div>
+          </div>
+          <div class="chartMetaRow chartMetaRow--compact">
+            <span class="statpill" id="gt5PctLatest">Latest: –</span>
+            <span class="statpill" id="gt5PctPeak">Peak: –</span>
+            <span class="statpill" id="gt5PctAverage">Average: –</span>
+          </div>
+        </div>
+        <div id="gt5RolesChart" class="chartWrap chartWrap--secondary" aria-live="polite"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Per-year values</h2>
+        <div class="hint">The table below follows the same filters as both line graphs, so you can inspect exact values year by year.</div>
+        <div class="tablewrap">
+          <table class="table" id="perYearTable" aria-label="Per-year table">
+            <thead>
+              <tr>
+                <th>Year</th>
+                <th>Matching rows</th>
+                <th>Named individuals</th>
+                <th>Women</th>
+                <th>% women</th>
+                <th>People &gt; 5 roles</th>
+                <th>% people &gt; 5 roles</th>
+                <th>Conferences</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Filtered sample</h2>
+        <div class="hint">Use this to sanity-check the slice behind the charts. Search and other filters update this panel, both charts, and the table together.</div>
+
         <div class="kpirow">
           <div class="kpi">
-            <div class="kpi__label">Unique individuals matching filters</div>
+            <div class="kpi__label">Unique named individuals matching filters</div>
             <div class="kpi__value" id="sumUniquePeople">–</div>
           </div>
           <div class="kpi">
             <div class="kpi__label">Matching rows</div>
             <div class="kpi__value" id="sumRows">–</div>
           </div>
+          <div class="kpi">
+            <div class="kpi__label">Overall % women in current slice</div>
+            <div class="kpi__value" id="sumOverallPct">–</div>
+          </div>
+          <div class="kpi">
+            <div class="kpi__label">Overall % people with &gt; 5 roles</div>
+            <div class="kpi__value" id="sumOverallGt5Pct">–</div>
+          </div>
         </div>
 
         <details class="details">
           <summary>Show a few matching names</summary>
-          <div class="hint">Sample up to 25 names (to sanity-check the filter combination).</div>
+          <div class="hint">Sample up to 25 names from the currently filtered slice.</div>
           <ul class="namelist" id="sumNameSample"></ul>
         </details>
       </section>
-    </main>
+    </main></main>
   </section>
 
   <section id="tabTimeline" class="tabpane" aria-label="Timeline">
@@ -128,8 +195,8 @@
         <h2>Filters</h2>
 
         <label class="field">
-          <span class="field__label">Search conference / organization / individual</span>
-          <input id="searchInput" type="search" placeholder="e.g., California, Andrews, or Publishing Association" autocomplete="off" />
+          <span class="field__label">Search name</span>
+          <input id="searchInput" type="search" placeholder="e.g., Andrews" autocomplete="off" />
         </label>
 
         <div class="fieldRow">
@@ -187,14 +254,14 @@
         </div>
 
         <p class="hint">
-          Tip: Each row is now a conference. Continuous bars show years when that conference is active in the current filtered view; a later bar shows the conference entering or returning after a gap. Click a bar to open organizations, then click an organization to see people.
+          Tip: Click an item on the timeline to view details. Use the left-right scroll on the timeline to move through years.
         </p>
       </section>
 
       <section class="panel__section">
         <h2>Selected</h2>
         <div id="detailCard" class="detailCard muted">
-          Click a conference span on the timeline to open organizations and individuals.
+          Click a point on the timeline to see details here.
         </div>
       </section>
     </aside>
@@ -221,77 +288,6 @@
       </div>
     </section>
   </main>
-
-
-
-
-  <!-- Conference Drill-down Modal -->
-  <div id="conferenceModal" class="modal modal--drilldown" aria-hidden="true">
-    <div class="modal__backdrop" id="conferenceBackdrop"></div>
-    <div class="modal__panel modal__panel--drilldown" role="dialog" aria-modal="true" aria-label="Conference details">
-      <div class="modal__header">
-        <div>
-          <div class="modal__title" id="conferenceModalTitle">Conference details</div>
-          <div class="modal__subtitle" id="conferenceModalSubtitle">Organizations and individuals in the selected span</div>
-        </div>
-        <div class="modal__actions">
-          <button class="btn" id="conferenceCloseBtn" type="button">Close</button>
-        </div>
-      </div>
-
-      <div class="modal__body">
-        <div class="drillLayout">
-          <section class="drillSection">
-            <h3 class="drillHeading">Overview</h3>
-            <div class="statgrid" id="conferenceStatGrid"></div>
-            <div class="chiprow" id="conferenceYears"></div>
-          </section>
-
-          <section class="drillSection drillSection--scroll">
-            <div class="drillSection__top">
-              <h3 class="drillHeading">Organizations</h3>
-              <div class="hint">Click an organization to open the people panel.</div>
-            </div>
-            <div class="orgList" id="conferenceOrgList"></div>
-          </section>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Organization Drill-down Modal -->
-  <div id="organizationModal" class="modal modal--drilldown modal--nested" aria-hidden="true">
-    <div class="modal__backdrop" id="organizationBackdrop"></div>
-    <div class="modal__panel modal__panel--drilldown modal__panel--nested" role="dialog" aria-modal="true" aria-label="Organization details">
-      <div class="modal__header">
-        <div>
-          <div class="modal__title" id="organizationModalTitle">Organization details</div>
-          <div class="modal__subtitle" id="organizationModalSubtitle">Individuals in the selected organization</div>
-        </div>
-        <div class="modal__actions">
-          <button class="btn" id="organizationBackBtn" type="button">Back</button>
-          <button class="btn" id="organizationCloseBtn" type="button">Close</button>
-        </div>
-      </div>
-
-      <div class="modal__body">
-        <div class="drillLayout drillLayout--single">
-          <section class="drillSection">
-            <h3 class="drillHeading">Overview</h3>
-            <div class="statgrid" id="organizationStatGrid"></div>
-          </section>
-
-          <section class="drillSection drillSection--scroll">
-            <div class="drillSection__top">
-              <h3 class="drillHeading">Individuals</h3>
-              <div class="hint">Grouped by year so you can see who appears in that organization over time.</div>
-            </div>
-            <div class="yearStack" id="organizationPeopleList"></div>
-          </section>
-        </div>
-      </div>
-    </div>
-  </div>
 
 
   <!-- Hierarchy Modal -->
