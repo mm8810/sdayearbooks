@@ -55,6 +55,27 @@
     "1908 Yearbook" },
     { "year": 1909, "file": 
     "data/1909.csv", "label": 
-    "1909 Yearbook" }      
+    "1909 Yearbook" },
+    { "year": 1910, "file": 
+    "data/1910.csv", "label": 
+    "1910 Yearbook" },
+    { "year": 1911, "file": 
+    "data/1911.csv", "label": 
+    "1911 Yearbook" },
+    { "year": 1912, "file": 
+    "data/1912.csv", "label": 
+    "1912 Yearbook" },
+    { "year": 1913, "file": 
+    "data/1913.csv", "label": 
+    "1913 Yearbook" },
+    { "year": 1914, "file": 
+    "data/1914.csv", "label": 
+    "1914 Yearbook" },
+    { "year": 1915, "file": 
+    "data/1915.csv", "label": 
+    "1915 Yearbook" },  
+    { "year": 1916, "file": 
+    "data/1916.csv", "label": 
+    "1916 Yearbook" }   
   ]
 }

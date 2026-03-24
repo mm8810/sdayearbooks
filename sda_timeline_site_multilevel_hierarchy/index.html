@@ -30,7 +30,7 @@
     <header class="topbar topbar--summary">
       <div class="brand">
         <div class="brand__title">Yearbook Summary</div>
-        <div class="brand__subtitle">Counts computed from enabled datasets in <code>manifest.json</code></div>
+        <div class="brand__subtitle">Counts computed from the yearbooks listed in <code>manifest.json</code></div>
       </div>
       <div class="topbar__actions">
         <span class="statpill" id="sumStatLoaded">Loaded: –</span>
@@ -38,16 +38,11 @@
     </header>
 
     <main class="layout layout--summary">
-      <section class="panel panel--hero">
-        <div class="panel__header panel__header--split">
+      <section class="panel panel--hero panel--summary-filters">
+        <div class="panel__header">
           <div>
-            <h2>Women among named individuals over time</h2>
-            <div class="hint">This is the primary summary view. It uses the same live filter slice across conference, organization, role, role detail, geography, search, and year range.</div>
-          </div>
-          <div class="chartMetaRow chartMetaRow--compact">
-            <span class="statpill" id="womenPctLatest">Latest: –</span>
-            <span class="statpill" id="womenPctPeak">Peak: –</span>
-            <span class="statpill" id="womenPctAverage">Average: –</span>
+            <h2>Summary Filters</h2>
+            <div class="hint">These controls drive both charts, the per-year table, and the supporting sample panels below.</div>
           </div>
         </div>
 
@@ -97,11 +92,24 @@
         <div class="summaryActions">
           <button class="btn" id="sumResetBtn" type="button">Reset summary filters</button>
         </div>
+      </section>
 
+      <section class="panel panel--summary-chart">
+        <div class="panel__header panel__header--split">
+          <div>
+            <h2>Women among named individuals over time</h2>
+            <div class="hint">This is the primary summary view. It uses the same live filter slice across conference, organization, role, role detail, geography, search, and year range.</div>
+          </div>
+          <div class="chartMetaRow chartMetaRow--compact">
+            <span class="statpill" id="womenPctLatest">Latest: –</span>
+            <span class="statpill" id="womenPctPeak">Peak: –</span>
+            <span class="statpill" id="womenPctAverage">Average: –</span>
+          </div>
+        </div>
         <div id="womenPctChart" class="chartWrap chartWrap--hero" aria-live="polite"></div>
       </section>
 
-      <section class="panel">
+      <section class="panel panel--summary-chart">
         <div class="panel__header panel__header--split">
           <div>
             <h2>People with more than five roles over time</h2>
@@ -116,7 +124,7 @@
         <div id="gt5RolesChart" class="chartWrap chartWrap--secondary" aria-live="polite"></div>
       </section>
 
-      <section class="panel">
+      <section class="panel panel--summary-full">
         <h2>Per-year values</h2>
         <div class="hint">The table below follows the same filters as both line graphs, so you can inspect exact values year by year.</div>
         <div class="tablewrap">
@@ -138,7 +146,13 @@
         </div>
       </section>
 
-      <section class="panel">
+      <section class="panel panel--summary-full">
+        <h2>Top 10 people by role count in each year</h2>
+        <div class="hint">For every year in the current filtered slice, this shows the ten named individuals with the most matching roles that year.</div>
+        <div id="topPeopleByYear" class="yearLeadersGrid" aria-live="polite"></div>
+      </section>
+
+      <section class="panel panel--summary-full">
         <h2>Filtered sample</h2>
         <div class="hint">Use this to sanity-check the slice behind the charts. Search and other filters update this panel, both charts, and the table together.</div>
 
@@ -167,7 +181,7 @@
           <ul class="namelist" id="sumNameSample"></ul>
         </details>
       </section>
-    </main></main>
+    </main>
   </section>
 
   <section id="tabTimeline" class="tabpane" aria-label="Timeline">
@@ -179,18 +193,13 @@
     </div>
 
     <div class="topbar__actions">
-      <a class="btn" href="#" id="hierarchyBtn" title="Open hierarchical position view by conference">Hierarchy view</a>
+      <a class="btn" href="#" id="hierarchyBtn" title="Open the selected entity hierarchy">Hierarchy view</a>
       <a class="btn" href="#" id="exportBtn" title="Download current filtered view as JSON">Export view</a>
     </div>
   </header>
 
   <main class="layout">
     <aside class="panel">
-      <section class="panel__section">
-        <h2>Datasets</h2>
-        <div id="datasetList" class="datasetList"></div>
-      </section>
-
       <section class="panel__section">
         <h2>Filters</h2>
 
@@ -239,6 +248,15 @@
 
         <div class="fieldRow">
           <label class="field">
+            <span class="field__label">Conference type</span>
+            <select id="entityTypeSelect">
+              <option value="">All conference types</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="fieldRow">
+          <label class="field">
             <span class="field__label">Year range</span>
             <div class="rangeRow">
               <input id="yearMin" type="number" min="1800" max="2100" value="1883" />
@@ -254,14 +272,14 @@
         </div>
 
         <p class="hint">
-          Tip: Click an item on the timeline to view details. Use the left-right scroll on the timeline to move through years.
+          Tip: The timeline uses one row per normalized conference. Each span shows the years when that conference appears in the loaded data, and clicking a year opens the organizations and people associated with that conference at that time.
         </p>
       </section>
 
       <section class="panel__section">
         <h2>Selected</h2>
         <div id="detailCard" class="detailCard muted">
-          Click a point on the timeline to see details here.
+          Click a conference span on the timeline to inspect that conference at a specific year.
         </div>
       </section>
     </aside>
@@ -296,8 +314,8 @@
     <div class="modal__panel" role="dialog" aria-modal="true" aria-label="Hierarchy view">
       <div class="modal__header">
         <div>
-          <div class="modal__title">Conference hierarchy</div>
-          <div class="modal__subtitle">Grouped by position • Click a node to pin details</div>
+          <div class="modal__title">Conference Leadership View</div>
+          <div class="modal__subtitle">Select a conference and year to see its normalized organizations, then drill down into positions and people.</div>
         </div>
         <div class="modal__actions">
           <label class="field field--inline">
@@ -305,17 +323,6 @@
             <select id="hierarchyConferenceSelect">
               <option value="">Select a conference</option>
             </select>
-          </label>
-          <label class="field field--inline">
-            <span class="field__label">Group</span>
-            <select id="hierarchyGroupingSelect">
-  <option value="conference_org_position" selected>
-    Organization → Position → People
-  </option>
-  <option value="position">Position → People</option>
-  <option value="org_position">Organization → Position → People</option>
-  <option value="org_group_position">Organization → Group → Position → People</option>
-</select>
           </label>
           <button class="btn" id="hierarchyCloseBtn" type="button">Close</button>
         </div>
@@ -328,14 +335,14 @@
           </div>
           <div class="hierSide">
             <div class="detailCard muted" id="hierarchyDetail">
-              Select a conference to render the hierarchy. Then click a node for details.
+              Select a conference to render the normalized organizations and leadership for that year. Then click an organization, position, or person for details.
             </div>
             <div class="hint" style="margin-top:10px;">
               Notes:
               <ul style="margin:6px 0 0 18px; padding:0; color:inherit;">
-                <li>Positions are grouped by exact string match (you can normalize later).</li>
-                <li>Names under a position are sorted alphabetically.</li>
-                <li>Only rows currently loaded (enabled datasets) are included.</li>
+                <li>Conference and organization labels use canonical values from <code>normalization.json</code>.</li>
+                <li>Only rows currently loaded and currently filtered are included.</li>
+                <li>Person chips are de-duplicated within each position for the selected year.</li>
               </ul>
             </div>
           </div>
@@ -352,4 +359,3 @@
   </section>
 </body>
 </html>
-

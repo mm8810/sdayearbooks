@@ -1,27 +1,67 @@
-python3 -m http.server 8000
-http://localhost:8000
+## Local run
 
-Adding More Yearbooks
-Place parsed CSVs in data/
-data/1884.csv
-data/1885.csv
-Register them in manifest.json:
+```bash
+python3 -m http.server 8000
+```
+
+Open `http://localhost:8000`.
+
+## Adding more yearbooks
+
+1. Place parsed CSVs in `data/`.
+2. Register each file in `manifest.json`.
+3. Refresh the page.
+
+Example:
+
+```json
 {
-"datasets": [
-{ "year": 1883, "file": "data/1883.csv", "label": "1883 Yearbook" },
-{ "year": 1884, "file": "data/1884.csv", "label": "1884 Yearbook" }
-]
+  "datasets": [
+    { "year": 1883, "file": "data/1883.csv", "label": "1883 Yearbook" },
+    { "year": 1884, "file": "data/1884.csv", "label": "1884 Yearbook" }
+  ]
 }
-Refresh the page. The dataset list updates automatically.
-Hierarchy View
-Click "Hierarchy view" in the top bar.
-Select a conference.
-Choose a grouping strategy:
-Organization -> Position -> People
-Position -> People
-Organization -> Group -> Position -> People
-Only enabled datasets are included.
-Positions are grouped by exact string match.
-Exporting Data
-Click "Export view" to download the currently filtered rows as JSON.
-Useful for network analysis, leadership composition analysis, debugging parsing pipelines, and feeding into Python or R notebooks.
+```
+
+## Timeline model
+
+- The timeline uses one row per normalized conference.
+- Each conference row shows one or more active spans based on the years where that normalized conference appears in the loaded data.
+- `Region` is treated as metadata and filtering context, not as the main timeline lane.
+- Clicking a conference span at a given year opens a year-specific leadership view.
+- The popup uses the selected conference and year, then shows `organization -> position -> people`.
+- The popup uses the yearbooks currently loaded from `manifest.json` and the current filters.
+
+## Normalization system
+
+- Canonical mappings live in `normalization.json`.
+- The app computes `conference_canonical` and `organization_canonical` for every row before filtering or rendering the timeline.
+- The goal is to merge spelling and label variants without collapsing genuinely different entity types.
+- The normalization guide PDF is the primary source for explicit aliases, especially for institution renames and equivalent organization labels.
+- A small amount of rule-based cleanup also trims obvious legal-name suffixes such as `Conference Association of Seventh-day Adventists` down to the underlying conference association name.
+
+Examples:
+
+- `British` and `Great Britain` normalize to `British`.
+- `Central European` normalizes to `Central Europe`.
+- `Workers Directory`, `Worker Directory`, and `S.D.A. Workers' Directory` normalize to `Workers' Directory`.
+
+## Maintaining normalization rules
+
+Use the helper script to generate candidate clusters from the raw CSV labels:
+
+```bash
+python3 scripts/generate_normalization_report.py --min-cluster-size 2
+```
+
+You can also write the report to a file:
+
+```bash
+python3 scripts/generate_normalization_report.py --output normalization-report.json
+```
+
+Review the suggested clusters, then promote confirmed variants into `normalization.json`.
+
+## Exporting data
+
+Use `Export view` to download the current filtered rows as JSON.
