@@ -216,12 +216,12 @@
             </select>
           </label>
 
-          <label class="field">
-            <span class="field__label">Conference</span>
-            <select id="confSelect">
-              <option value="">All conferences</option>
-            </select>
-          </label>
+  <label class="field">
+    <span class="field__label">Conference rollup</span>
+    <select id="confSelect">
+      <option value="">All conference rollups</option>
+    </select>
+  </label>
         </div>
         <div class="fieldRow">
   <label class="field">
@@ -272,14 +272,14 @@
         </div>
 
         <p class="hint">
-          Tip: The timeline uses one row per normalized conference. Each span shows the years when that conference appears in the loaded data, and clicking a year opens the organizations and people associated with that conference at that time.
+          Tip: Each row shows a conference rollup as a line of active years. Hover a point to see the exact year, then click that point to open the organization view for that specific year.
         </p>
       </section>
 
       <section class="panel__section">
         <h2>Selected</h2>
         <div id="detailCard" class="detailCard muted">
-          Click a conference span on the timeline to inspect that conference at a specific year.
+          Hover or click a point on the timeline to inspect that conference at a specific year.
         </div>
       </section>
     </aside>
@@ -292,6 +292,16 @@
       </div>
 
       <div id="timeline" class="timeline"></div>
+
+      <section class="timelineMajorPanel" aria-labelledby="majorPlayersHeading">
+        <div class="timelineMajorPanel__header">
+          <div>
+            <h2 id="majorPlayersHeading">Major Players By Year</h2>
+            <div class="hint">Top recurring names in each year of the current filtered slice. Names use the same canonical normalization layer as the rest of the app.</div>
+          </div>
+        </div>
+        <div id="timelineMajorPlayers" class="timelineMajorPlayers" aria-live="polite"></div>
+      </section>
 
       <div class="content__bottom">
         <details>
@@ -315,13 +325,25 @@
       <div class="modal__header">
         <div>
           <div class="modal__title">Conference Leadership View</div>
-          <div class="modal__subtitle">Select a conference and year to see its normalized organizations, then drill down into positions and people.</div>
+          <div class="modal__subtitle">Choose one year, one guide-based conference rollup, and one normalized organization to view the people network for that slice.</div>
         </div>
         <div class="modal__actions">
           <label class="field field--inline">
-            <span class="field__label">Conference</span>
+            <span class="field__label">Year</span>
+            <select id="hierarchyYearSelect">
+              <option value="">Select a year</option>
+            </select>
+          </label>
+          <label class="field field--inline">
+            <span class="field__label">Conference rollup</span>
             <select id="hierarchyConferenceSelect">
-              <option value="">Select a conference</option>
+              <option value="">Select a conference rollup</option>
+            </select>
+          </label>
+          <label class="field field--inline">
+            <span class="field__label">Organization</span>
+            <select id="hierarchyOrganizationSelect">
+              <option value="">Select an organization</option>
             </select>
           </label>
           <button class="btn" id="hierarchyCloseBtn" type="button">Close</button>
@@ -335,14 +357,14 @@
           </div>
           <div class="hierSide">
             <div class="detailCard muted" id="hierarchyDetail">
-              Select a conference to render the normalized organizations and leadership for that year. Then click an organization, position, or person for details.
+              Choose a single year, conference rollup, and organization to render the people network. Then click any person node for details.
             </div>
             <div class="hint" style="margin-top:10px;">
               Notes:
-              <ul style="margin:6px 0 0 18px; padding:0; color:inherit;">
+              <ul class="hierHintList">
                 <li>Conference and organization labels use canonical values from <code>normalization.json</code>.</li>
                 <li>Only rows currently loaded and currently filtered are included.</li>
-                <li>Person chips are de-duplicated within each position for the selected year.</li>
+                <li>Rank order is inferred from position titles, so links show an intuitive structure rather than a source-explicit org chart.</li>
               </ul>
             </div>
           </div>

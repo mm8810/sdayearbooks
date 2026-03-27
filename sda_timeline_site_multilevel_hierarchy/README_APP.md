@@ -25,11 +25,13 @@ Example:
 
 ## Timeline model
 
-- The timeline uses one row per normalized conference.
-- Each conference row shows one or more active spans based on the years where that normalized conference appears in the loaded data.
+- The timeline uses one row per guide-based conference rollup.
+- Each timeline rollup is derived from the conference normalization guide, so state or subconference names can roll up into headings like `Atlantic Union / Columbia Union`, `Lake Union`, `Southern Union`, `Pacific Union`, and `General`.
+- Each conference row shows one or more active spans based on the years where that rollup appears in the loaded data.
+- Conference rows are ordered by guide-based conference categories such as `General`, `North American - Lake Union`, and `North American - Pacific Union`.
 - `Region` is treated as metadata and filtering context, not as the main timeline lane.
 - Clicking a conference span at a given year opens a year-specific leadership view.
-- The popup uses the selected conference and year, then shows `organization -> position -> people`.
+- The popup uses the selected rollup and year, then shows `organization -> position -> people` along with the source conferences included in that rollup.
 - The popup uses the yearbooks currently loaded from `manifest.json` and the current filters.
 
 ## Normalization system
