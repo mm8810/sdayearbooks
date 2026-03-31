@@ -60,11 +60,19 @@
             <select id="sumConference"></select>
           </label>
           <label class="field">
+            <span>Conference type</span>
+            <select id="sumConferenceType"></select>
+          </label>
+          <label class="field">
             <span>Organization</span>
             <select id="sumOrganization"></select>
           </label>
           <label class="field">
-            <span>Group</span>
+            <span>Organization type</span>
+            <select id="sumOrganizationType"></select>
+          </label>
+          <label class="field">
+            <span>Organization group</span>
             <select id="sumGroup"></select>
           </label>
           <label class="field">
@@ -122,6 +130,24 @@
           </div>
         </div>
         <div id="gt5RolesChart" class="chartWrap chartWrap--secondary" aria-live="polite"></div>
+      </section>
+
+      <section class="panel panel--summary-full">
+        <h2>Organization group mix over time</h2>
+        <div class="hint">This compares the changing mix of organization groups year by year, using the aggregate-term groupings from the grouped workbook. The display focuses on the most prominent groups in the current filtered slice.</div>
+        <div id="groupMixChart" class="groupMixChart" aria-live="polite"></div>
+      </section>
+
+      <section class="panel panel--summary-full">
+        <h2>Organization groups at a glance</h2>
+        <div class="hint">These cards summarize which organization groups dominate the current slice, along with how their gender balance, role concentration, and active years differ.</div>
+        <div id="groupStatsGrid" class="groupStatsGrid" aria-live="polite"></div>
+      </section>
+
+      <section class="panel panel--summary-full">
+        <h2>Top role types by gender</h2>
+        <div class="hint">This view respects the current summary filters, so you can drill down by organization type, organization group, conference, organization, year range, and more. For each gender bucket, it surfaces the most frequent role titles in the current slice.</div>
+        <div id="topRolesByGender" class="genderRoleGrid" aria-live="polite"></div>
       </section>
 
       <section class="panel panel--summary-full">
@@ -246,6 +272,13 @@
   </select>
 </label>
 
+<label class="field">
+  <span class="field__label">Organization group</span>
+  <select id="groupSelect">
+    <option value="">All organization groups</option>
+  </select>
+</label>
+
         <div class="fieldRow">
           <label class="field">
             <span class="field__label">Conference type</span>
@@ -292,6 +325,16 @@
       </div>
 
       <div id="timeline" class="timeline"></div>
+
+      <section class="timelineGroupPanel" aria-labelledby="timelineGroupHeading">
+        <div class="timelineGroupPanel__header">
+          <div>
+            <h2 id="timelineGroupHeading">Organization Group Activity By Year</h2>
+            <div class="hint">This strip shows how the current timeline slice shifts across organization groups over time. Each year stacks the most prominent groups, so you can quickly see when conference, tract, health, publishing, or school-related work expands or recedes.</div>
+          </div>
+        </div>
+        <div id="timelineGroupPulse" class="timelineGroupPulse" aria-live="polite"></div>
+      </section>
 
       <section class="timelineMajorPanel" aria-labelledby="majorPlayersHeading">
         <div class="timelineMajorPanel__header">

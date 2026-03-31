@@ -10,6 +10,7 @@ let timelineInitialWindowSet = false;
 let hierarchyPinned = null;
 let hierarchyYear = null;
 let normalizationConfig = null;
+let aggregateTermsConfig = null;
 
 const CONFERENCE_CATEGORY_ORDER = [
   "General",
@@ -245,6 +246,27 @@ async function loadNormalizationConfig(){
   }
 }
 
+async function loadAggregateTermsConfig(){
+  aggregateTermsConfig = {
+    organizationGroupAliases: {},
+    organizationGroupOrder: [],
+  };
+
+  try {
+    const res = await fetch("aggregate_terms_groups.json");
+    if (!res.ok) return;
+    const raw = await res.json();
+    aggregateTermsConfig = {
+      organizationGroupAliases: mergeNormalizationMaps(raw.organization_group_aliases),
+      organizationGroupOrder: Array.isArray(raw.organization_group_order)
+        ? raw.organization_group_order.map(value => normalizeSpacing(value)).filter(Boolean)
+        : [],
+    };
+  } catch (err) {
+    console.warn("aggregate_terms_groups.json could not be loaded; using fallback group inference.", err);
+  }
+}
+
 function escapeRegExp(str){
   return String(str).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -363,6 +385,55 @@ function normalizeOrganizationEntity(raw){
     type,
     canonical: canonical || family || type,
   };
+}
+
+function fallbackOrganizationGroup(row){
+  const type = safe(row.organization_type);
+  if (type) {
+    if (type === "Conference Tract Society" || type === "Tract Society Department") return "Tract Society";
+    if (type === "Tract and Missionary Society") return "Tract and Missionary";
+    if (type === "Health and Temperance Association" || type === "Health and Temperance Society") return "Health and Temperance";
+    if (type === "Sabbath-School Department" || type === "Sabbath-School Association") return "Sabbath-School";
+    if (type === "Publishing Association" || type === "Publishing Department") return "Publishing";
+    if (type === "Directory") return "Workers' Directory";
+    if (type === "College" || type === "Academy") return "School";
+    return type;
+  }
+
+  const raw = normalizeKey(
+    safe(row.organization_canonical) ||
+    safe(row.organization) ||
+    safe(row.institution_name)
+  );
+  if (!raw) return "";
+  if (raw.includes("tract and missionary")) return "Tract and Missionary";
+  if (raw.includes("tract society")) return "Tract Society";
+  if (raw.includes("health and temperance")) return "Health and Temperance";
+  if (raw.includes("sabbath-school")) return "Sabbath-School";
+  if (raw.includes("publishing")) return "Publishing";
+  if (raw.includes("city mission")) return "City Mission";
+  if (raw.includes("conference")) return "Conference";
+  if (raw.includes("mission")) return "Mission";
+  if (raw.includes("school") || raw.includes("college") || raw.includes("academy")) return "School";
+  return "";
+}
+
+function resolveOrganizationGroup(row){
+  const candidates = [
+    safe(row.organization),
+    safe(row.institution_name),
+    safe(row.organization_canonical),
+    safe(row.organization_raw),
+  ]
+    .map(value => normalizeKey(value))
+    .filter(Boolean);
+
+  for (const key of candidates){
+    const hit = aggregateTermsConfig?.organizationGroupAliases?.[key];
+    if (hit) return normalizeSpacing(hit);
+  }
+
+  return fallbackOrganizationGroup(row) || safe(row.group_raw) || "";
 }
 
 function pluralize(count, singular, plural = `${singular}s`){
@@ -719,6 +790,7 @@ function renderTimelineDetail(item, year = null){
     selectedYear !== null ? ["Regions in year", summarizeValues(yearRegions)] : null,
     selectedYear !== null ? ["Rows in year", yearRows.length.toLocaleString()] : null,
     selectedYear !== null ? ["Named people in year", countNamedPeople(yearRows).toLocaleString()] : null,
+    selectedYear !== null ? ["Organization groups in year", summarizeValues(yearRows.map(groupLabelForRow))] : null,
     sourceConferenceLabel.length ? ["Source conferences in year", sourceConferenceLabel.join(" • ")] : null,
     relatedLabel.length ? ["Organizations in year", relatedLabel.join(" • ")] : null,
   ].filter(Boolean);
@@ -747,17 +819,20 @@ function setStats(){
   els.statYears.textContent = `Years: ${yearLabel}`;
 }
 
-function majorPlayerTone(key){
+function majorPlayerTone(key, gender){
+  const baseTone = genderTone(gender);
   let hash = 0;
   for (const ch of String(key || "")){
     hash = ((hash << 5) - hash) + ch.charCodeAt(0);
     hash |= 0;
   }
-  const hue = Math.abs(hash) % 360;
+  const shift = Math.abs(hash) % 12;
   return {
-    bg: `hsla(${hue}, 82%, 62%, 0.18)`,
-    border: `hsla(${hue}, 86%, 72%, 0.46)`,
-    glow: `hsla(${hue}, 88%, 58%, 0.24)`,
+    bg: baseTone.bg,
+    border: baseTone.border,
+    glow: baseTone.glow,
+    accent: `translateX(${shift - 6}px)`,
+    label: genderBucketLabel(gender),
   };
 }
 
@@ -781,9 +856,15 @@ function renderTimelineMajorPlayers(rows, opts = {}){
     rowsByYear.get(year).push(row);
   }
 
+  const activeYears = Array.from(rowsByYear.keys()).sort((a, b) => a - b);
+  if (!activeYears.length){
+    host.innerHTML = `<div class="majorPlayersEmpty">No rows match the current timeline filters.</div>`;
+    return;
+  }
+
   const yearlyLeaders = [];
   let maxRoleCount = 1;
-  for (let year = yearMin; year <= yearMax; year += 1){
+  for (const year of activeYears){
     const yearRows = rowsByYear.get(year) || [];
     const people = new Map();
     for (const row of yearRows){
@@ -795,9 +876,14 @@ function renderTimelineMajorPlayers(rows, opts = {}){
           id: pid,
           label: personLabel(row),
           roleCount: 0,
+          gender: "",
         });
       }
-      people.get(pid).roleCount += 1;
+      const person = people.get(pid);
+      person.roleCount += 1;
+      const normalizedGender = normGender(row.gender);
+      if (!person.gender && normalizedGender) person.gender = normalizedGender;
+      else if (normalizedGender && person.gender && person.gender !== normalizedGender) person.gender = "";
     }
 
     const leaders = Array.from(people.values())
@@ -819,27 +905,19 @@ function renderTimelineMajorPlayers(rows, opts = {}){
   host.innerHTML = `
     <div class="majorPlayersGrid">
       ${yearlyLeaders.map(entry => {
-        if (!entry.rowCount){
-          return `
-            <article class="majorYearCard majorYearCard--empty">
-              <div class="majorYearCard__year">${entry.year}</div>
-              <div class="majorYearCard__meta">No loaded data</div>
-            </article>
-          `;
-        }
-
         const chips = entry.leaders.length
           ? entry.leaders.map(person => {
-              const tone = majorPlayerTone(person.id);
+              const tone = majorPlayerTone(person.id, person.gender);
               const width = Math.max(24, Math.round((person.roleCount / maxRoleCount) * 100));
               return `
                 <button
                   type="button"
                   class="majorPlayerChip"
                   data-player-name="${escapeHtml(person.label)}"
-                  title="${escapeHtml(`${person.label} • ${person.roleCount} matching roles in ${entry.year}`)}"
+                  title="${escapeHtml(`${person.label} • ${person.roleCount} matching roles in ${entry.year} • ${tone.label}`)}"
                   style="--major-bg:${tone.bg}; --major-border:${tone.border}; --major-glow:${tone.glow};"
                 >
+                  <span class="majorPlayerChip__gender">${escapeHtml(tone.label)}</span>
                   <span class="majorPlayerChip__name">${escapeHtml(person.label)}</span>
                   <span class="majorPlayerChip__count">${person.roleCount.toLocaleString()} role${person.roleCount === 1 ? "" : "s"}</span>
                   <span class="majorPlayerChip__bar" style="width:${width}%"></span>
@@ -875,6 +953,7 @@ function hydrateFilterOptions(){
   const positions = uniqSorted(allRows.map(r => r.position));
   const genders = uniqSorted(allRows.map(r => r.gender));
   const entityTypes = uniqSorted(allRows.map(row => inferConferenceEntityType(row)).filter(Boolean));
+  const groups = orderedOrganizationGroups(allRows);
   const orgs = uniqSorted(
     allRows
       .map(r => safe(r.organization_canonical) || safe(r.organization) || safe(r.institution_name))
@@ -887,6 +966,7 @@ function hydrateFilterOptions(){
   const prevPos = els.positionSelect?.value || "";
   const prevGender = els.genderSelect?.value || "";
   const prevOrg = els.orgSelect?.value || "";
+  const prevGroup = els.groupSelect?.value || "";
   const prevEntityType = els.entityTypeSelect?.value || "";
 
   els.regionSelect.innerHTML =
@@ -921,12 +1001,19 @@ function hydrateFilterOptions(){
       orgs.map(o => `<option value="${escapeHtml(o)}">${escapeHtml(o)}</option>`).join("");
   }
 
+  if (els.groupSelect){
+    els.groupSelect.innerHTML =
+      '<option value="">All organization groups</option>' +
+      groups.map(group => `<option value="${escapeHtml(group)}">${escapeHtml(group)}</option>`).join("");
+  }
+
   if (regions.includes(prevRegion)) els.regionSelect.value = prevRegion;
   if (confs.includes(prevConf)) els.confSelect.value = prevConf;
   if (els.positionSelect && positions.includes(prevPos)) els.positionSelect.value = prevPos;
   if (els.genderSelect && genders.includes(prevGender)) els.genderSelect.value = prevGender;
   if (els.entityTypeSelect && entityTypes.includes(prevEntityType)) els.entityTypeSelect.value = prevEntityType;
   if (els.orgSelect && orgs.includes(prevOrg)) els.orgSelect.value = prevOrg;
+  if (els.groupSelect && groups.includes(prevGroup)) els.groupSelect.value = prevGroup;
 }
 
 function escapeHtml(str){
@@ -945,6 +1032,7 @@ function applyFilters(){
   const pos = safe(els.positionSelect?.value);
   const gender = safe(els.genderSelect?.value);
   const orgSel = safe(els.orgSelect?.value);
+  const groupSel = safe(els.groupSelect?.value);
   const yMin = Number(els.yearMin.value || 0);
   const yMax = Number(els.yearMax.value || 9999);
 
@@ -969,6 +1057,8 @@ function applyFilters(){
       const orgLabel = safe(r.organization_canonical) || safe(r.organization) || safe(r.institution_name);
       if (safe(orgLabel) !== orgSel) return false;
     }
+
+    if (groupSel && groupLabelForRow(r) !== groupSel) return false;
 
     return true;
   });
@@ -1016,6 +1106,11 @@ function applyFilters(){
 
   renderTimelineDetail(null);
   setStats();
+  renderOrganizationGroupMix("timelineGroupPulse", filtered, {
+    topN: 6,
+    compact: true,
+    emptyMessage: "No organization-group activity is available for the current timeline filters.",
+  });
   renderTimelineMajorPlayers(filtered, { yearMin: yMin, yearMax: yMax });
 
   if (els.hierarchyModal && els.hierarchyModal.getAttribute("aria-hidden") === "false"){
@@ -1030,6 +1125,7 @@ function resetFilters(){
   if (els.positionSelect) els.positionSelect.value = "";
   if (els.genderSelect) els.genderSelect.value = "";
   if (els.orgSelect) els.orgSelect.value = "";
+  if (els.groupSelect) els.groupSelect.value = "";
   if (els.entityTypeSelect) els.entityTypeSelect.value = "";
   els.yearMin.value = "1883";
   els.yearMax.value = "1921";
@@ -1663,11 +1759,15 @@ function normalizeRow(r, year){
 
   const organizationSource = safe(out.organization) || safe(out.institution_name);
   const organizationNorm = normalizeOrganizationEntity(organizationSource);
+  out.organization_raw = normalizeSpacing(out.organization);
   out.organization = normalizeSpacing(out.organization);
   out.institution_name = normalizeSpacing(out.institution_name);
   out.organization_family = organizationNorm.family;
   out.organization_type = organizationNorm.type;
   out.organization_canonical = organizationNorm.canonical;
+  out.group_raw = normalizeSpacing(out.group);
+  out.organization_group = resolveOrganizationGroup(out);
+  out.group = out.organization_group || out.group_raw;
 
   out.name_raw = normalizeSpacing(out.name);
   out.name_canonical = normalizePersonName(out.name_raw);
@@ -1743,6 +1843,7 @@ async function main(){
   els.positionSelect = $("positionSelect");
   els.genderSelect = $("genderSelect");
   els.orgSelect = $("orgSelect");
+  els.groupSelect = $("groupSelect");
   els.entityTypeSelect = $("entityTypeSelect");
   els.yearMin = $("yearMin");
   els.yearMax = $("yearMax");
@@ -1764,9 +1865,11 @@ async function main(){
   els.statShown = $("statShown");
   els.statYears = $("statYears");
   els.timeline = $("timeline");
+  els.timelineGroupPulse = $("timelineGroupPulse");
   els.timelineMajorPlayers = $("timelineMajorPlayers");
 
   await loadNormalizationConfig();
+  await loadAggregateTermsConfig();
   initTimeline();
 
   manifest = await loadManifest();
@@ -1802,7 +1905,7 @@ async function main(){
     if (e.key === "Enter") applyFilters();
   });
 
-  [els.regionSelect, els.confSelect, els.positionSelect, els.genderSelect, els.orgSelect, els.entityTypeSelect]
+  [els.regionSelect, els.confSelect, els.positionSelect, els.genderSelect, els.orgSelect, els.groupSelect, els.entityTypeSelect]
     .filter(Boolean)
     .forEach(select => select.addEventListener("change", applyFilters));
 
@@ -1835,6 +1938,43 @@ function normGender(g){
   return s;
 }
 
+function genderBucketLabel(gender){
+  const normalized = normGender(gender);
+  if (normalized === "female") return "Women";
+  if (normalized === "male") return "Men";
+  if (normalized) return titleCaseWords(normalized);
+  return "Unspecified";
+}
+
+function genderTone(gender){
+  const normalized = normGender(gender);
+  if (normalized === "female") {
+    return {
+      bg: "rgba(255, 131, 170, 0.20)",
+      border: "rgba(255, 171, 201, 0.48)",
+      glow: "rgba(255, 108, 165, 0.26)",
+      base: "#ff89b1",
+      soft: "#ffd0e4",
+    };
+  }
+  if (normalized === "male") {
+    return {
+      bg: "rgba(102, 164, 255, 0.18)",
+      border: "rgba(150, 195, 255, 0.46)",
+      glow: "rgba(102, 164, 255, 0.22)",
+      base: "#77b3ff",
+      soft: "#d3e7ff",
+    };
+  }
+  return {
+    bg: "rgba(170, 183, 214, 0.16)",
+    border: "rgba(196, 205, 228, 0.38)",
+    glow: "rgba(170, 183, 214, 0.18)",
+    base: "#b2bdd6",
+    soft: "#e0e7f8",
+  };
+}
+
 function personId(r){
   const n = safe(r.name_canonical) || safe(r.name);
   if (n) return n.toLowerCase();
@@ -1847,7 +1987,14 @@ function personLabel(r){
 }
 
 function summaryOrgLabel(r){
-  return safe(r.organization) || safe(r.institution_name);
+  return safe(r.organization_canonical) || safe(r.organization) || safe(r.institution_name);
+}
+
+function groupLabelForRow(r){
+  const value = safe(r.organization_group) || safe(r.group);
+  if (!value) return "";
+  if (value.toLowerCase() === "remove") return "";
+  return value;
 }
 
 function tokenizeQuery(query){
@@ -1870,7 +2017,9 @@ function summaryHaystack(r){
     safe(r.position),
     safe(r.position_information),
     summaryOrgLabel(r),
-    safe(r.group),
+    groupLabelForRow(r),
+    safe(r.organization_type),
+    inferConferenceEntityType(r),
     safe(r.conference),
     safe(r.location),
     safe(r.region),
@@ -1927,16 +2076,20 @@ function getSummaryYearBounds(rows){
 
 function hydrateSummaryFilters(rows){
   const regions = uniqSorted(rows.map(r => safe(r.region)).filter(Boolean));
-  const confs = uniqSorted(rows.map(r => safe(r.conference)).filter(Boolean));
+  const confs = uniqSorted(rows.map(r => safe(r.conference_rollup) || safe(r.conference_canonical) || safe(r.conference)).filter(Boolean));
+  const conferenceTypes = uniqSorted(rows.map(inferConferenceEntityType).filter(Boolean));
   const orgs = uniqSorted(rows.map(r => summaryOrgLabel(r)).filter(Boolean));
-  const groups = uniqSorted(rows.map(r => safe(r.group)).filter(Boolean));
+  const organizationTypes = uniqSorted(rows.map(r => safe(r.organization_type)).filter(Boolean));
+  const groups = orderedOrganizationGroups(rows);
   const roles = uniqSorted(rows.map(r => safe(r.position)).filter(Boolean));
   const genders = uniqSorted(rows.map(r => normGender(r.gender)).filter(Boolean));
   const bounds = getSummaryYearBounds(rows);
 
   setSelectOptions($("sumRegion"), regions, { includeAll: true, allLabel: "All regions" });
   setSelectOptions($("sumConference"), confs, { includeAll: true, allLabel: "All conferences" });
+  setSelectOptions($("sumConferenceType"), conferenceTypes, { includeAll: true, allLabel: "All conference types" });
   setSelectOptions($("sumOrganization"), orgs, { includeAll: true, allLabel: "All organizations" });
+  setSelectOptions($("sumOrganizationType"), organizationTypes, { includeAll: true, allLabel: "All organization types" });
   setSelectOptions($("sumGroup"), groups, { includeAll: true, allLabel: "All groups" });
   setSelectOptions($("sumRole"), roles, { includeAll: true, allLabel: "All roles" });
   setSelectOptions($("sumGender"), genders, { includeAll: true, allLabel: "All genders" });
@@ -1970,7 +2123,9 @@ function readSummaryState(rows = allRows){
     search: safe($("sumSearch")?.value),
     region: safe($("sumRegion")?.value),
     conference: safe($("sumConference")?.value),
+    conferenceType: safe($("sumConferenceType")?.value),
     organization: safe($("sumOrganization")?.value),
+    organizationType: safe($("sumOrganizationType")?.value),
     group: safe($("sumGroup")?.value),
     role: safe($("sumRole")?.value),
     roleDetail: safe($("sumRoleDetail")?.value),
@@ -1986,9 +2141,11 @@ function filterSummaryRows(rows, state = readSummaryState(rows)){
     if (!Number.isFinite(year) || year < state.yearMin || year > state.yearMax) return false;
     if (state.search && !matchesAllTerms(summaryHaystack(r), state.search)) return false;
     if (state.region && safe(r.region) !== state.region) return false;
-    if (state.conference && safe(r.conference) !== state.conference) return false;
+    if (state.conference && (safe(r.conference_rollup) || safe(r.conference_canonical) || safe(r.conference)) !== state.conference) return false;
+    if (state.conferenceType && inferConferenceEntityType(r) !== state.conferenceType) return false;
     if (state.organization && summaryOrgLabel(r) !== state.organization) return false;
-    if (state.group && safe(r.group) !== state.group) return false;
+    if (state.organizationType && safe(r.organization_type) !== state.organizationType) return false;
+    if (state.group && groupLabelForRow(r) !== state.group) return false;
     if (state.role && safe(r.position) !== state.role) return false;
     if (state.roleDetail && !matchesAllTerms(safe(r.position_information), state.roleDetail)) return false;
     if (state.gender && normGender(r.gender) !== state.gender) return false;
@@ -2063,6 +2220,343 @@ function computeAggregateMetrics(stats){
     womenPct: totalNamed ? (totalWomen / totalNamed) * 100 : NaN,
     gt5Pct: totalNamed ? (totalGt5 / totalNamed) * 100 : NaN,
   };
+}
+
+const GROUP_TONE_PRESETS = {
+  "Conference": { base: "#72b1ff", soft: "#a0f0ff" },
+  "Mission": { base: "#4ed3bf", soft: "#9ef4ca" },
+  "Tract Society": { base: "#ffb35f", soft: "#ffd590" },
+  "Tract and Missionary": { base: "#ff8a66", soft: "#ffc28f" },
+  "Sabbath-School": { base: "#a48cff", soft: "#d7b7ff" },
+  "Health and Temperance": { base: "#77d97a", soft: "#bbf0a1" },
+  "Publishing": { base: "#ff7dac", soft: "#ffbbd6" },
+  "School": { base: "#6fd2ff", soft: "#b8f2ff" },
+  "City Mission": { base: "#ff9b5e", soft: "#ffd0a8" },
+  "Board": { base: "#8fd2d0", soft: "#c6f4ec" },
+  "Committee": { base: "#a0aec6", soft: "#d9e2ff" },
+  "Workers' Directory": { base: "#c68bff", soft: "#e1c3ff" },
+  "Young People's Dept": { base: "#ff8f9e", soft: "#ffd0d6" },
+  "Religious Liberty": { base: "#e8be68", soft: "#ffe3a6" },
+  "Canvassing Agents": { base: "#69c1a7", soft: "#a8edd1" },
+  "*": { base: "#8c96b2", soft: "#c7d0e8" },
+};
+
+function groupDisplayLabel(group){
+  return safe(group) === "*" ? "Uncertain *" : (safe(group) || "Ungrouped");
+}
+
+function groupSortIndex(group){
+  const order = aggregateTermsConfig?.organizationGroupOrder || [];
+  const idx = order.indexOf(safe(group));
+  return idx === -1 ? Number.MAX_SAFE_INTEGER : idx;
+}
+
+function groupTone(group){
+  const label = safe(group) || "*";
+  if (GROUP_TONE_PRESETS[label]) return GROUP_TONE_PRESETS[label];
+  let hash = 0;
+  for (const ch of label){
+    hash = ((hash << 5) - hash) + ch.charCodeAt(0);
+    hash |= 0;
+  }
+  const hue = Math.abs(hash) % 360;
+  return {
+    base: `hsl(${hue} 76% 65%)`,
+    soft: `hsl(${(hue + 32) % 360} 88% 82%)`,
+  };
+}
+
+function compareGroups(a, b){
+  return groupSortIndex(a) - groupSortIndex(b) || groupDisplayLabel(a).localeCompare(groupDisplayLabel(b));
+}
+
+function orderedOrganizationGroups(rows){
+  return Array.from(new Set(rows.map(groupLabelForRow).filter(Boolean))).sort(compareGroups);
+}
+
+function buildOrganizationGroupMetrics(rows){
+  const byGroup = new Map();
+  for (const row of rows){
+    const group = groupLabelForRow(row);
+    if (!group) continue;
+    if (!byGroup.has(group)){
+      byGroup.set(group, {
+        group,
+        rowCount: 0,
+        years: new Set(),
+        people: new Map(),
+        organizations: new Map(),
+      });
+    }
+    const bucket = byGroup.get(group);
+    bucket.rowCount += 1;
+    const year = Number(row.yearbook_year);
+    if (Number.isFinite(year)) bucket.years.add(year);
+
+    const org = summaryOrgLabel(row);
+    if (org) bucket.organizations.set(org, (bucket.organizations.get(org) || 0) + 1);
+
+    if (!isLikelyNamedIndividual(row)) continue;
+    const pid = personId(row);
+    if (!pid) continue;
+    if (!bucket.people.has(pid)){
+      bucket.people.set(pid, {
+        label: personLabel(row),
+        female: false,
+        roleCount: 0,
+      });
+    }
+    const person = bucket.people.get(pid);
+    person.roleCount += 1;
+    if (normGender(row.gender) === "female") person.female = true;
+  }
+
+  return Array.from(byGroup.values())
+    .map(bucket => {
+      const people = Array.from(bucket.people.values());
+      const women = people.filter(person => person.female).length;
+      const gt5 = people.filter(person => person.roleCount > 5).length;
+      const years = Array.from(bucket.years).sort((a, b) => a - b);
+      const topOrganizations = Array.from(bucket.organizations.entries())
+        .sort((a, b) => (b[1] - a[1]) || a[0].localeCompare(b[0]))
+        .slice(0, 3)
+        .map(([label, count]) => `${label} (${count})`);
+
+      return {
+        group: bucket.group,
+        rowCount: bucket.rowCount,
+        namedIndividuals: people.length,
+        women,
+        womenPct: people.length ? (women / people.length) * 100 : NaN,
+        gt5,
+        gt5Pct: people.length ? (gt5 / people.length) * 100 : NaN,
+        years,
+        topOrganizations,
+      };
+    })
+    .sort((a, b) =>
+      (b.rowCount - a.rowCount) ||
+      (b.namedIndividuals - a.namedIndividuals) ||
+      compareGroups(a.group, b.group)
+    );
+}
+
+function buildOrganizationGroupYearMix(rows, topN = 6){
+  const yearBuckets = new Map();
+  const totals = new Map();
+
+  for (const row of rows){
+    const year = Number(row.yearbook_year);
+    if (!Number.isFinite(year)) continue;
+    const group = groupLabelForRow(row);
+    if (!group) continue;
+    if (!yearBuckets.has(year)) yearBuckets.set(year, new Map());
+    const bucket = yearBuckets.get(year);
+    bucket.set(group, (bucket.get(group) || 0) + 1);
+    totals.set(group, (totals.get(group) || 0) + 1);
+  }
+
+  const topGroups = Array.from(totals.entries())
+    .sort((a, b) => (b[1] - a[1]) || compareGroups(a[0], b[0]))
+    .slice(0, topN)
+    .map(([group]) => group);
+
+  const years = Array.from(yearBuckets.keys()).sort((a, b) => a - b);
+  const series = years.map(year => {
+    const source = yearBuckets.get(year) || new Map();
+    const entries = [];
+    let otherCount = 0;
+    let total = 0;
+    for (const [group, count] of source.entries()){
+      total += count;
+      if (topGroups.includes(group)) entries.push({ group, count });
+      else otherCount += count;
+    }
+    entries.sort((a, b) => compareGroups(a.group, b.group));
+    if (otherCount) entries.push({ group: "Other", count: otherCount });
+    const dominant = entries.reduce((best, entry) => !best || entry.count > best.count ? entry : best, null);
+    return {
+      year,
+      total,
+      dominant: dominant?.group || "",
+      entries: entries.map(entry => ({
+        ...entry,
+        pct: total ? (entry.count / total) * 100 : 0,
+      })),
+    };
+  });
+
+  const legend = [...topGroups];
+  if (series.some(item => item.entries.some(entry => entry.group === "Other"))) legend.push("Other");
+  return { series, legend };
+}
+
+function renderOrganizationGroupMix(elId, rows, opts = {}){
+  const host = $(elId);
+  if (!host) return;
+  const { series, legend } = buildOrganizationGroupYearMix(rows, opts.topN || 6);
+  if (!series.length){
+    host.innerHTML = `<div class="summaryEmptyState">${escapeHtml(opts.emptyMessage || "No organization-group activity is available for this slice.")}</div>`;
+    return;
+  }
+
+  const legendHtml = legend.map(group => {
+    const tone = groupTone(group);
+    return `
+      <div class="groupMixLegend__item">
+        <span class="groupMixLegend__swatch" style="--group-base:${tone.base}; --group-soft:${tone.soft};"></span>
+        <span>${escapeHtml(groupDisplayLabel(group))}</span>
+      </div>
+    `;
+  }).join("");
+
+  const barsHtml = series.map(item => {
+    const segments = item.entries.map(entry => {
+      const tone = groupTone(entry.group);
+      const pct = Math.max(entry.pct, entry.count > 0 ? 2 : 0);
+      return `
+        <div
+          class="groupMixYear__segment"
+          style="height:${pct.toFixed(2)}%; --group-base:${tone.base}; --group-soft:${tone.soft};"
+          title="${escapeHtml(`${item.year} • ${groupDisplayLabel(entry.group)} • ${entry.count} rows (${formatPercent(entry.pct)})`)}"
+        ></div>
+      `;
+    }).join("");
+
+    return `
+      <article class="groupMixYear">
+        <div class="groupMixYear__bar">${segments}</div>
+        <div class="groupMixYear__year">${item.year}</div>
+        <div class="groupMixYear__meta">${pluralize(item.total, "row")}</div>
+        <div class="groupMixYear__dominant">${escapeHtml(groupDisplayLabel(item.dominant || "*"))}</div>
+      </article>
+    `;
+  }).join("");
+
+  host.className = `${host.className.split(" ").filter(Boolean).filter(cls => !cls.startsWith("groupMixChart--")).join(" ")} ${opts.compact ? "groupMixChart--compact" : "groupMixChart--full"}`.trim();
+  host.innerHTML = `
+    <div class="groupMixLegend">${legendHtml}</div>
+    <div class="groupMixChart__scroller">
+      <div class="groupMixChart__bars">${barsHtml}</div>
+    </div>
+  `;
+}
+
+function renderOrganizationGroupCards(elId, rows){
+  const host = $(elId);
+  if (!host) return;
+  const metrics = buildOrganizationGroupMetrics(rows).slice(0, 12);
+  if (!metrics.length){
+    host.innerHTML = `<div class="summaryEmptyState">No organization-group summary is available for this slice.</div>`;
+    return;
+  }
+
+  host.innerHTML = metrics.map(metric => {
+    const tone = groupTone(metric.group);
+    const yearsLabel = metric.years.length
+      ? (metric.years[0] === metric.years[metric.years.length - 1]
+        ? String(metric.years[0])
+        : `${metric.years[0]}–${metric.years[metric.years.length - 1]}`)
+      : "–";
+    return `
+      <article class="groupStatCard" style="--group-base:${tone.base}; --group-soft:${tone.soft};">
+        <div class="groupStatCard__header">
+          <div>
+            <div class="groupStatCard__title">${escapeHtml(groupDisplayLabel(metric.group))}</div>
+            <div class="groupStatCard__years">Active years: ${escapeHtml(yearsLabel)}</div>
+          </div>
+          <div class="groupStatCard__rows">${metric.rowCount.toLocaleString()}</div>
+        </div>
+        <div class="groupStatCard__stats">
+          <div><span>Named people</span><strong>${metric.namedIndividuals.toLocaleString()}</strong></div>
+          <div><span>% women</span><strong>${escapeHtml(formatPercent(metric.womenPct))}</strong></div>
+          <div><span>% > 5 roles</span><strong>${escapeHtml(formatPercent(metric.gt5Pct))}</strong></div>
+        </div>
+        <div class="groupStatCard__footer">${escapeHtml(metric.topOrganizations.join(" • ") || "No dominant organizations in this slice.")}</div>
+      </article>
+    `;
+  }).join("");
+}
+
+function buildTopRolesByGender(rows, topN = 5){
+  const buckets = new Map();
+  for (const row of rows){
+    if (!isLikelyNamedIndividual(row)) continue;
+    const role = safe(row.position);
+    if (!role) continue;
+    const gender = normGender(row.gender) || "";
+    if (!buckets.has(gender)){
+      buckets.set(gender, {
+        gender,
+        totalRows: 0,
+        roles: new Map(),
+      });
+    }
+    const bucket = buckets.get(gender);
+    bucket.totalRows += 1;
+    bucket.roles.set(role, (bucket.roles.get(role) || 0) + 1);
+  }
+
+  const order = ["female", "male", ""];
+  return Array.from(buckets.values())
+    .sort((a, b) => {
+      const idxA = order.indexOf(a.gender);
+      const idxB = order.indexOf(b.gender);
+      return (idxA === -1 ? 99 : idxA) - (idxB === -1 ? 99 : idxB) ||
+        genderBucketLabel(a.gender).localeCompare(genderBucketLabel(b.gender));
+    })
+    .map(bucket => ({
+      gender: bucket.gender,
+      totalRows: bucket.totalRows,
+      roles: Array.from(bucket.roles.entries())
+        .sort((a, b) => (b[1] - a[1]) || a[0].localeCompare(b[0]))
+        .slice(0, topN)
+        .map(([role, count]) => ({
+          role,
+          count,
+          pct: bucket.totalRows ? (count / bucket.totalRows) * 100 : 0,
+        })),
+    }));
+}
+
+function renderTopRolesByGender(rows){
+  const host = $("topRolesByGender");
+  if (!host) return;
+  const buckets = buildTopRolesByGender(rows, 5);
+  if (!buckets.length){
+    host.innerHTML = `<div class="summaryEmptyState">No named rows with role titles match the current summary filters.</div>`;
+    return;
+  }
+
+  host.innerHTML = buckets.map(bucket => {
+    const tone = genderTone(bucket.gender);
+    const items = bucket.roles.length
+      ? bucket.roles.map((entry, index) => `
+          <li class="genderRoleItem">
+            <span class="genderRoleItem__rank">${index + 1}</span>
+            <div class="genderRoleItem__main">
+              <div class="genderRoleItem__label">${escapeHtml(entry.role)}</div>
+              <div class="genderRoleItem__meta">${entry.count.toLocaleString()} row${entry.count === 1 ? "" : "s"} • ${escapeHtml(formatPercent(entry.pct))} of this gender slice</div>
+            </div>
+            <div class="genderRoleItem__barWrap">
+              <span class="genderRoleItem__bar" style="width:${Math.max(entry.pct, 8).toFixed(2)}%; --gender-base:${tone.base}; --gender-soft:${tone.soft};"></span>
+            </div>
+          </li>
+        `).join("")
+      : `<li class="genderRoleItem genderRoleItem--empty">No roles in this gender bucket for the current slice.</li>`;
+
+    return `
+      <article class="genderRoleCard" style="--gender-base:${tone.base}; --gender-soft:${tone.soft};">
+        <div class="genderRoleCard__header">
+          <div>
+            <div class="genderRoleCard__title">${escapeHtml(genderBucketLabel(bucket.gender))}</div>
+            <div class="genderRoleCard__meta">${bucket.totalRows.toLocaleString()} matching role row${bucket.totalRows === 1 ? "" : "s"}</div>
+          </div>
+        </div>
+        <ol class="genderRoleList">${items}</ol>
+      </article>
+    `;
+  }).join("");
 }
 
 function setMetricPills(prefix, series, valueKey){
@@ -2357,6 +2851,12 @@ function renderSummary(){
     footnote: "For each year, this uses the filtered slice and counts whether each unique named individual has more than five matching role rows that year.",
   });
 
+  renderOrganizationGroupMix("groupMixChart", filteredRows, {
+    topN: 7,
+    emptyMessage: "No organization-group mix is available for this summary slice.",
+  });
+  renderOrganizationGroupCards("groupStatsGrid", filteredRows);
+  renderTopRolesByGender(filteredRows);
   renderPerYearTable(stats);
   renderTopPeopleByYear(stats);
   renderSummaryKpis(filteredRows, stats);
@@ -2371,7 +2871,7 @@ function queueSummaryRender(){
 }
 
 function attachSummaryHandlers(){
-  const ids = ["sumSearch", "sumRegion", "sumConference", "sumOrganization", "sumGroup", "sumRole", "sumRoleDetail", "sumGender", "sumYearMin", "sumYearMax"];
+  const ids = ["sumSearch", "sumRegion", "sumConference", "sumConferenceType", "sumOrganization", "sumOrganizationType", "sumGroup", "sumRole", "sumRoleDetail", "sumGender", "sumYearMin", "sumYearMax"];
   for (const id of ids){
     const el = $(id);
     if (!el) continue;
@@ -2391,7 +2891,9 @@ function attachSummaryHandlers(){
       if ($("sumSearch")) $("sumSearch").value = "";
       if ($("sumRegion")) $("sumRegion").value = "";
       if ($("sumConference")) $("sumConference").value = "";
+      if ($("sumConferenceType")) $("sumConferenceType").value = "";
       if ($("sumOrganization")) $("sumOrganization").value = "";
+      if ($("sumOrganizationType")) $("sumOrganizationType").value = "";
       if ($("sumGroup")) $("sumGroup").value = "";
       if ($("sumRole")) $("sumRole").value = "";
       if ($("sumRoleDetail")) $("sumRoleDetail").value = "";
