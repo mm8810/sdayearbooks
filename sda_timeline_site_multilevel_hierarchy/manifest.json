@@ -85,6 +85,12 @@
     "1918 Yearbook" }, 
     { "year": 1919, "file": 
     "data/1919.csv", "label": 
-    "1919 Yearbook" }    
+    "1919 Yearbook" },
+    { "year": 1920, "file": 
+    "data/1920.csv", "label": 
+    "1920 Yearbook" },
+    { "year": 1921, "file": 
+    "data/1921.csv", "label": 
+    "1921 Yearbook" }    
   ]
 }
