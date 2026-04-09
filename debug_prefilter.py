@@ -6,13 +6,9 @@ from werkzeug.utils import secure_filename
 import re
 from pathlib import Path
 
-# Prefilter (keep as-is from your file)
 from ai_prefilter import prefilter_pdf_for_ai
-
-# Rule parsers
 import sda_yearbook_1800s_parser as p1800s
 import sda_yearbook_1900s_parser as p1900s
-# AI parser (with limiter/caching)
 import sda_yearbook_parser_ai as pai
 
 ALLOWED_EXTENSIONS = {"pdf"}
@@ -22,7 +18,7 @@ def allowed_file(filename: str) -> bool:
 
 def _pick_uploaded_file(req):
     """
-    Accepts common field names and falls back to any .pdf file field.
+    Accept common field names and fall back to any PDF upload field.
     Returns (FileStorage or None, reason_string).
     """
     preferred = ["file", "pdf", "upload", "document"]
@@ -30,7 +26,7 @@ def _pick_uploaded_file(req):
         fs = req.files.get(key)
         if fs and getattr(fs, "filename", "") and allowed_file(fs.filename):
             return fs, f"found in field '{key}'"
-    # Fallback: any file with .pdf extension
+    # Fall back to any upload whose filename ends in .pdf.
     for key, fs in req.files.items():
         if fs and getattr(fs, "filename", "") and allowed_file(fs.filename):
             return fs, f"found in field '{key}' (fallback)"
@@ -49,7 +45,7 @@ def pick_rule_parser(year: Optional[int]):
     return p1900s
 
 def rows_to_csv_bytes_rule(rows) -> bytes:
-    # Accepts list of dataclass Rows or dicts
+    """Serialize rule-parser output to CSV bytes."""
     if not rows:
         return b""
     if hasattr(rows[0], "__dict__"):
@@ -122,7 +118,7 @@ def create_app():
         year = request.form.get("year")
         year = int(year) if year and year.isdigit() else guess_year_from_filename(filename)
 
-        # Where to write CSV
+        # Use a tokenized filename so repeated runs do not overwrite each other.
         out_dir = os.path.join(tempfile.gettempdir(), "sda_yearbook_results")
         os.makedirs(out_dir, exist_ok=True)
         token = uuid.uuid4().hex
@@ -136,7 +132,7 @@ def create_app():
             with open(out_csv, "wb") as f:
                 f.write(csv_bytes)
         else:
-            # AI path: FIXED - increased context window from 0 to 3
+            # Log each prefilter stage so it is easy to inspect what the model receives.
             print(f"🔍 DEBUG: Starting AI analysis of {pdf_path}")
             pages = prefilter_pdf_for_ai(pdf_path, context_window=3)
             print(f"🔍 DEBUG: Prefilter found {len(pages)} pages")
@@ -145,16 +141,16 @@ def create_app():
             pages = pages[:max_pages]
             print(f"🔍 DEBUG: Processing {len(pages)} pages (limited by AI_MAX_PAGES)")
 
-            # Debug: show what we found
+            # Print a small sample of the prefiltered pages before calling the model.
             if not pages:
                 print("❌ DEBUG: NO PAGES survived prefiltering! This is the problem.")
                 print("💡 SUGGESTION: Try running debug_prefilter.py on your PDF")
             else:
-                for i, (page_num, content) in enumerate(pages[:3]):  # Show first 3 pages
+                for i, (page_num, content) in enumerate(pages[:3]):
                     print(f"🔍 DEBUG: Page {page_num} has {len(content)} characters")
                     print(f"🔍 DEBUG: First 100 chars: {repr(content[:100])}")
 
-            # Write prefiltered text bundle for the AI runner
+            # Persist the exact prefiltered payload used by the AI runner.
             pre_txt = os.path.join(tmpdir, f"ai_pages_{token}.txt")
             with open(pre_txt, "w", encoding="utf-8") as f:
                 for i, txt in pages:
@@ -162,7 +158,7 @@ def create_app():
             
             print(f"🔍 DEBUG: Wrote prefiltered text to {pre_txt}")
             
-            # Check if prefiltered file has content
+            # Flag unexpectedly small bundles before the model call.
             if os.path.exists(pre_txt):
                 with open(pre_txt, 'r') as f:
                     content = f.read()
@@ -183,7 +179,7 @@ def create_app():
                 prefiltered_text_path=Path(pre_txt),
             )
 
-            # rows already written to CSV; re-read for summary
+            # Reload the output CSV so the UI summary matches the saved file.
             import pandas as pd
             try:
                 df = pd.read_csv(out_csv)
@@ -196,7 +192,7 @@ def create_app():
         info = summarize(rows_dicts if engine != "rules" else rows_dicts)
         dl_url = url_for("download_token", token=token)
         
-        # Enhanced result display with debug info
+        # Include the prefilter bundle path in the response for troubleshooting.
         debug_info = ""
         if engine == "ai":
             debug_info = f"<br/>Debug: {len(pages)} pages processed, prefiltered file: {pre_txt}"

@@ -1,5 +1,3 @@
-
-# sda_yearbook_parser_ai.py
 import argparse, os, re, json, csv, time, math, sys, tempfile, hashlib
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
@@ -7,19 +5,17 @@ from dataclasses import dataclass, asdict, field
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from dotenv import load_dotenv
 
-# Load environment variables from .env
 load_dotenv()
 
-# PDF (we keep ability to read raw PDF if no prefiltered text provided)
+# Read directly from the PDF when no prefiltered text bundle is supplied.
 try:
     from PyPDF2 import PdfReader
 except Exception:
     PdfReader = None
 
-# Rate limiter
 from rate_limiter import TokenBucket, estimate_tokens_from_text
 
-# Optional providers
+# Import providers lazily so the module still loads if only one SDK is installed.
 OpenAI = None
 anthropic = None
 try:
@@ -33,9 +29,6 @@ try:
 except Exception:
     pass
 
-# -----------------------------
-# Data model (kept simple)
-# -----------------------------
 @dataclass
 class Row:
     yearbook_year: Optional[int] = None
@@ -54,9 +47,6 @@ class Row:
     location: Optional[str] = None
     region: Optional[str] = None
 
-# -----------------------------
-# Provider skeleton + limits
-# -----------------------------
 class ProviderError(RuntimeError): ...
 class ProviderBase:
     def __init__(self, model: str, limiter: TokenBucket):
@@ -91,7 +81,6 @@ class OpenAIProvider(ProviderBase):
                 max_tokens=max_output_tokens,
             )
         except Exception as e:
-            # Let tenacity handle retries for rate/timeouts/5xx
             raise
         try:
             return resp.choices[0].message.content if resp and resp.choices else ""
@@ -123,7 +112,6 @@ class AnthropicProvider(ProviderBase):
         except Exception as e:
             raise
         try:
-            # anthropic returns a list of content blocks
             parts = []
             for block in resp.content or []:
                 if getattr(block, "type", "") == "text":
@@ -133,11 +121,9 @@ class AnthropicProvider(ProviderBase):
             return ""
 
 MODEL_LIMITS = {
-    # OpenAI
     "gpt-5":       {"TPM": 500_000, "RPM": 500},
     "gpt-5-mini":  {"TPM": 500_000, "RPM": 500},
     "gpt-4.1":     {"TPM": 30_000,  "RPM": 500},
-    # Anthropic (adjust if your account differs)
     "claude-3-5-sonnet": {"TPM": 500_000, "RPM": 400},
     "claude-3-haiku":    {"TPM": 500_000, "RPM": 400},
 }
@@ -145,9 +131,6 @@ MODEL_LIMITS = {
 def pick_limits(model: str):
     return MODEL_LIMITS.get(model, {"TPM": 30_000, "RPM": 60})
 
-# --------------
-# Prompt pieces
-# --------------
 SYSTEM_PROMPT = """You are extracting structured directory entries from scanned historical Seventh-day Adventist Yearbooks (1880s–1910s). These contain directories of people, offices, and institutions across conferences, missions, schools, publishing associations, etc.
 
 Output strict JSON Lines, one object per line. Each line represents one person entry (individual name with role information).
@@ -227,16 +210,12 @@ Examples of valid entries:
 {"yearbook_year":1904,"page":27,"name":"S. Fulton","last_name":"Fulton","prefix":null,"suffix":null,"gender":"male","position":"President","position_information":null,"organization":"Tennessee Conference","group":"State Conference Directories","conference":"Tennessee","institution_name":null,"location":"Nashville, Tenn.","region":"United States"}"""
 
 def build_user_prompt(page_text: str, page_index: Optional[int], year: Optional[int]) -> str:
-    # Trim noisy whitespace and long runs
+    """Build a compact per-page prompt for the model."""
     text = re.sub(r"[ \t]+", " ", page_text or "").strip()
     text = re.sub(r"\n{3,}", "\n\n", text)
-    # Keep prompt compact
     head = f"YEAR: {year if year is not None else 'unknown'}\nPAGE_INDEX: {page_index if page_index is not None else 'unknown'}"
-    return head + "\n--- PAGE TEXT ---\n" + text[:6000]  # hard cap text
+    return head + "\n--- PAGE TEXT ---\n" + text[:6000]
 
-# --------------
-# Cache helpers
-# --------------
 CACHE_DIR = Path(tempfile.gettempdir()) / "sda_ai_cache"
 CACHE_DIR.mkdir(exist_ok=True)
 
@@ -256,16 +235,12 @@ def cached_complete(provider: str, model: str, call_fn, system_prompt: str, user
         except Exception:
             pass
     out = call_fn()
-    # store plain text
     try:
         key_path.write_text(out, encoding="utf-8")
     except Exception:
         pass
     return out
 
-# --------------
-# Core runner
-# --------------
 def run(pdf: Path,
         provider_name: str,
         model: str,
@@ -287,10 +262,9 @@ def run(pdf: Path,
     else:
         raise ProviderError("Unknown provider: choose 'anthropic' or 'openai'")
 
-    # Load text pages (either from prefilter file or raw PDF)
+    # Read either the prefiltered text bundle or the raw PDF pages.
     pages: List[Tuple[int, str]] = []
     if prefiltered_text_path and Path(prefiltered_text_path).exists():
-        # File format: "==== PAGE i ====" lines
         raw = Path(prefiltered_text_path).read_text(encoding="utf-8", errors="ignore")
         buf = []
         idx = None
@@ -319,13 +293,12 @@ def run(pdf: Path,
                 text = ""
             pages.append((i, text))
 
-    # Cap pages if requested
     if max_pages is not None:
         pages = pages[:max_pages]
 
     rows: List[Row] = []
 
-    # Process pages with concurrency bound by environment
+    # Keep a small worker pool so API calls can overlap without overwhelming the limiter.
     from concurrent.futures import ThreadPoolExecutor, as_completed
     max_workers = int(os.environ.get("AI_MAX_INFLIGHT", "6"))
 
@@ -341,7 +314,6 @@ def run(pdf: Path,
                 obj = json.loads(line)
                 out_rows.append(Row(**obj))
             except Exception:
-                # Skip malformed lines
                 continue
         return out_rows
 
@@ -353,7 +325,6 @@ def run(pdf: Path,
             except Exception:
                 continue
 
-    # Write CSV
     fieldnames = [f.name for f in Row.__dataclass_fields__.values()]
     out_csv.parent.mkdir(parents=True, exist_ok=True)
     with open(out_csv, "w", newline="", encoding="utf-8") as f:
@@ -381,4 +352,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

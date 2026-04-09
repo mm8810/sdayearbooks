@@ -8,14 +8,9 @@ from pathlib import Path
 import zipfile
 from collections import Counter
 
-
-# Prefilter (keep as-is from your file)
 from ai_prefilter import prefilter_pdf_for_ai
-
-# Rule parsers
 import sda_yearbook_1800s_parser as p1800s
 import sda_yearbook_1900s_parser as p1900s
-# AI parser (with limiter/caching)
 import sda_yearbook_parser_ai as pai
 
 ALLOWED_EXTENSIONS = {"pdf"}
@@ -26,12 +21,12 @@ def allowed_file(filename: str) -> bool:
 def pick_uploaded_pdfs(req):
     """
     Returns (List[FileStorage], reason_string)
-    Accepts common field names and also supports <input multiple>.
+    Accepts common field names and supports multi-file inputs.
     """
     preferred = ["file", "files", "pdf", "upload", "document"]
     found = []
 
-    # 1) Try getlist() on common keys (supports multiple)
+    # Check the common upload field names first.
     for key in preferred:
         if key in req.files:
             items = req.files.getlist(key)
@@ -39,7 +34,7 @@ def pick_uploaded_pdfs(req):
                 if fs and getattr(fs, "filename", "") and allowed_file(fs.filename):
                     found.append(fs)
 
-    # 2) Fallback: scan everything in req.files
+    # Fall back to any PDF-looking upload field.
     if not found:
         for _, fs in req.files.items():
             if fs and getattr(fs, "filename", "") and allowed_file(fs.filename):
@@ -55,7 +50,7 @@ def pick_uploaded_pdfs(req):
 
 def make_output_name(original_filename: str, year: Optional[int]) -> str:
     """
-    Prefer YB1883.csv naming. If year can't be inferred, fall back to stem.
+    Prefer YB1883.csv naming. If the year is unknown, use the filename stem.
     """
     if year:
         return f"YB{year}.csv"
@@ -73,7 +68,7 @@ def pick_rule_parser(year: Optional[int]):
     return p1900s
 
 def rows_to_csv_bytes_rule(rows) -> bytes:
-    # Accepts list of dataclass Rows or dicts
+    """Serialize rule-parser output to CSV bytes."""
     if not rows:
         return b""
     if hasattr(rows[0], "__dict__"):
@@ -140,7 +135,7 @@ def create_app():
         year_override = request.form.get("year")
         year_override = int(year_override) if year_override and year_override.isdigit() else None
 
-        # Results are stored under a per-run token folder
+        # Keep each request in its own temporary result directory.
         out_root = os.path.join(tempfile.gettempdir(), "sda_yearbook_results")
         os.makedirs(out_root, exist_ok=True)
         token = uuid.uuid4().hex
@@ -161,11 +156,10 @@ def create_app():
 
             year = year_override if year_override else guess_year_from_filename(filename)
 
-            # Output name: YB1883.csv (or fallback)
+            # Prefer year-based filenames, with a suffix if multiple uploads collide.
             base_name = make_output_name(filename, year)
             used_names[base_name] += 1
             if used_names[base_name] > 1:
-                # avoid collisions if two files resolve to same year/name
                 stem, ext = os.path.splitext(base_name)
                 base_name = f"{stem}_{used_names[base_name]}{ext}"
 
@@ -181,7 +175,8 @@ def create_app():
                 combined_rows_for_summary.extend(rows_dicts)
 
             else:
-                # AI path: prefilter aggressively to reduce tokens
+                # Prefilter before the model call so the prompt only contains
+                # directory-like lines and a small amount of nearby context.
                 pages = prefilter_pdf_for_ai(pdf_path, context_window=3)
                 max_pages = int(os.environ.get("AI_MAX_PAGES", "40"))
                 pages = pages[:max_pages]
@@ -203,7 +198,7 @@ def create_app():
                     prefiltered_text_path=Path(pre_txt),
                 )
 
-                # re-read for summary
+                # Reload the written CSV so the summary path is the same for all engines.
                 try:
                     import pandas as pd
                     df = pd.read_csv(out_csv)
@@ -215,7 +210,7 @@ def create_app():
 
             produced_csvs.append(out_csv)
 
-        # If multiple CSVs, zip them for a single download click
+        # Bundle multi-file runs into a single archive for download.
         if len(produced_csvs) > 1:
             zip_path = os.path.join(run_dir, f"YB_outputs_{token}.zip")
             with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
@@ -229,7 +224,7 @@ def create_app():
                 f"<pre>Top conferences (sample): {info['top_conferences']}</pre>"
             )
 
-        # Single file: return that CSV directly
+        # Return the CSV directly when there is only one output file.
         dl_url = url_for("download_token", token=token)
         info = summarize(combined_rows_for_summary)
         return (
@@ -244,13 +239,12 @@ def create_app():
             from flask import abort
             abort(404)
 
-        # Prefer ZIP if present
+        # Multi-file runs create a ZIP; single-file runs leave just a CSV.
         zips = [p for p in os.listdir(run_dir) if p.lower().endswith(".zip")]
         if zips:
             zip_path = os.path.join(run_dir, zips[0])
             return send_file(zip_path, mimetype="application/zip", as_attachment=True, download_name=zips[0])
 
-        # Otherwise, send the single CSV
         csvs = [p for p in os.listdir(run_dir) if p.lower().endswith(".csv")]
         if len(csvs) == 1:
             csv_path = os.path.join(run_dir, csvs[0])
@@ -264,7 +258,6 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5050"))
     app = create_app()
     app.run(host="127.0.0.1", port=port, debug=True)
-
 
 
 

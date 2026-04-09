@@ -30,31 +30,26 @@ ROLE_CORE = r'(?:President|Vice-?President|Associate Vice-?President|Secretary|T
 
 NAME_REGEX = re.compile(r'\b((?:[A-Z]\.\s*){1,4}[A-Z][a-zA-Z-]+)\b')
 
-# Pattern to detect conference headers
 CONFERENCE_PATTERN = re.compile(
     r'\b([A-Z][A-Z\s-]+)\s+(?:UNION\s+)?CONFERENCE\b',
-   # flags=re.IGNORECASE
 )
 
-# Pattern to detect mission headers
 MISSION_PATTERN = re.compile(
     r'\b([A-Z][A-Z\s-]+)\s+MISSION\b',
-   # flags=re.IGNORECASE
 )
 
-# Pattern for list-style entries: "Region: Name, Location"
+# List-style entries such as "Region: Name, Location".
 REGION_LIST_PATTERN = re.compile(
     r'^([A-Z][A-Za-z\s\-]+?):\s*([A-Z][A-Za-z\s\.\-]+?),\s*(.+?)$',
     flags=re.MULTILINE
 )
 
-# Extended role pattern with qualifiers
+# Role blocks may include a trailing qualifier, such as "Secretary for ..." .
 ROLE_WITH_QUALIFIER = re.compile(
     rf'(?P<role>{ROLE_CORE})\s*(?:for\s+(?P<qualifier>[^:]+))?:',
     flags=re.IGNORECASE
 )
 
-# Pattern to detect section headers that indicate list-style content
 LIST_SECTION_HEADERS = [
     "PRESIDENTS OF UNION CONFERENCES",
     "SUPERINTENDENTS OF UNION MISSIONS",
@@ -113,18 +108,15 @@ OFFICER_GROUP_ALIASES = [
 
 def detect_conference(text: str, start_pos: int) -> Optional[Tuple[str, int]]:
     """Detect conference name near the given position."""
-    # Look backwards up to 500 chars for a conference header
     search_start = max(0, start_pos - 1000)
     search_text = text[search_start:start_pos + 100]
     
-    # Try to find conference pattern
     matches = list(CONFERENCE_PATTERN.finditer(search_text))
     if matches:
         last_match = matches[-1]
         conf_name = last_match.group(1).strip().title()
         return (conf_name, search_start + last_match.start())
     
-    # Try to find mission pattern
     matches = list(MISSION_PATTERN.finditer(search_text))
     if matches:
         last_match = matches[-1]
@@ -160,12 +152,10 @@ def detect_section_type(section_text: str, group_name: str) -> str:
     upper_text = section_text[:300].upper()
     upper_group = group_name.upper()
     
-    # Check for list-style sections
     for header in LIST_SECTION_HEADERS:
         if header in upper_text or header in upper_group:
             return 'list'
     
-    # Check for member list sections
     for header in MEMBER_SECTION_HEADERS:
         if header in upper_text or header in upper_group:
             return 'members'
@@ -179,8 +169,7 @@ def parse_list_style_entries(section_text: str, group_name: str) -> List[Tuple[O
     """
     entries = []
     
-    # Determine position type based on section header
-    position = "member"  # default
+    position = "member"
     if "PRESIDENTS" in group_name.upper():
         position = "president"
     elif "SUPERINTENDENTS" in group_name.upper():
@@ -192,13 +181,11 @@ def parse_list_style_entries(section_text: str, group_name: str) -> List[Tuple[O
     elif "AGENTS" in group_name.upper() or "AGENT" in group_name.upper():
         position = "agent"
     
-    # Find all region: name, location patterns
     for match in REGION_LIST_PATTERN.finditer(section_text):
         region = match.group(1).strip()
         name = match.group(2).strip()
         location = match.group(3).strip()
         
-        # Clean up location (remove trailing page numbers, etc.)
         location = re.sub(r'\s+\d{1,3}\s*$', '', location).strip()
         location = re.sub(r'\s*\.\s*$', '', location).strip()
         
@@ -213,7 +200,6 @@ def parse_member_list(section_text: str) -> List[Tuple[str, Optional[str]]]:
     """
     entries = []
     
-    # Split by lines and look for name, location patterns
     lines = section_text.split('\n')
     
     for line in lines:
@@ -221,20 +207,16 @@ def parse_member_list(section_text: str) -> List[Tuple[str, Optional[str]]]:
         if not line or len(line) < 10:
             continue
         
-        # Skip lines that look like headers
         if line.isupper() or line.endswith(':'):
             continue
         
-        # Look for pattern: Name, Location
         names = [m.group(1).strip() for m in NAME_REGEX.finditer(line)]
         if names and ',' in line:
-            # Get everything after the first name as location
             first_name_match = NAME_REGEX.search(line)
             if first_name_match:
                 remaining = line[first_name_match.end():].strip()
                 if remaining.startswith(','):
                     location = remaining[1:].strip()
-                    # Clean location
                     location = re.sub(r'\s+\d{1,3}\s*$', '', location).strip()
                     location = re.sub(r'\s*\.\s*$', '', location).strip()
                     if location:
@@ -250,14 +232,11 @@ def iter_role_blocks_enhanced(section_text: str, section_type: str) -> List[Tupl
     Returns: [(position, position_qualifier, content), ...]
     """
     if section_type == 'list':
-        # Signal to caller to use list parsing
         return [('__LIST__', None, section_text)]
     
     if section_type == 'members':
-        # Signal to caller to use member list parsing
         return [('__MEMBERS__', None, section_text)]
     
-    # Original role-based parsing with enhanced qualifier extraction
     blocks = []
     positions = []
     
@@ -332,18 +311,14 @@ def extract_from_pdf(pdf_path: str) -> List[Row]:
             if group == "unlabeled":
                 continue
             
-            # Detect which conference this section belongs to
             conf_info = detect_conference(text, section_start_pos)
             conference_name = conf_info[0] if conf_info else "General"
             
-            # Determine section type
             section_type = detect_section_type(section, group)
             
-            # Get role blocks with enhanced parsing
             role_blocks = iter_role_blocks_enhanced(section, section_type)
             
             for position, qualifier, content in role_blocks:
-                # Handle list-style sections
                 if position == '__LIST__':
                     list_entries = parse_list_style_entries(content, group)
                     
@@ -370,7 +345,6 @@ def extract_from_pdf(pdf_path: str) -> List[Row]:
                             source_pdf=os.path.basename(pdf_path)
                         ))
                 
-                # Handle member list sections
                 elif position == '__MEMBERS__':
                     member_entries = parse_member_list(content)
                     
@@ -397,7 +371,6 @@ def extract_from_pdf(pdf_path: str) -> List[Row]:
                             source_pdf=os.path.basename(pdf_path)
                         ))
                 
-                # Handle traditional role-based sections
                 else:
                     names, location = split_names_and_location(content)
                     
@@ -427,7 +400,6 @@ def extract_from_pdf(pdf_path: str) -> List[Row]:
                             source_pdf=os.path.basename(pdf_path)
                         ))
     
-    # Deduplicate
     seen = set()
     uniq = []
     for r in rows:
@@ -486,7 +458,6 @@ def main():
 
     args = ap.parse_args()
 
-    # If no inputs specified, automatically find all YB19*.pdf files
     if not args.inputs:
         current_dir = os.getcwd()
         pattern = os.path.join(current_dir, "YB19*.pdf")
@@ -522,7 +493,6 @@ def main():
     write_csv(all_rows, args.out, append=args.append)
     print(f"\nWrote {len(all_rows)} total rows to {args.out} ({'append' if args.append else 'overwrite'})")
     
-    # Summary statistics
     from collections import Counter
     print(f"\nSummary by year:")
     year_counts = Counter(r.yearbook_year for r in all_rows)

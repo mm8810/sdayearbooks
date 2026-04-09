@@ -11,7 +11,7 @@ try:
 except Exception:
     raise SystemExit("PyPDF2>=3.0.0 required. pip install PyPDF2")
 
-# -------- Data model (internal, neutral field names) --------
+# Internal row model used by the rule-based extractor.
 @dataclass
 class Row:
     conference: Optional[str] = None
@@ -31,7 +31,7 @@ class Row:
     page: Optional[int] = None
     source_pdf: Optional[str] = None
 
-# Default CSV schema if you do NOT provide a sample CSV to copy
+# Default CSV schema used when no sample output file is provided.
 DEFAULT_SCHEMA = [
     ("conference","conference"),
     ("region","region"),
@@ -51,7 +51,7 @@ DEFAULT_SCHEMA = [
     ("source-pdf","source_pdf"),
 ]
 
-# -------- PDF utils --------
+# PDF helpers.
 def read_pdf_text_per_page(path: str) -> List[Tuple[int, str]]:
     pages = []
     reader = PdfReader(path)
@@ -60,16 +60,15 @@ def read_pdf_text_per_page(path: str) -> List[Tuple[int, str]]:
             txt = page.extract_text() or ""
         except Exception:
             txt = ""
-        # normalize
         txt = txt.replace("\r", "\n")
         txt = re.sub(r"[ \t]+", " ", txt)
         txt = re.sub(r"\n{3,}", "\n\n", txt)
-        # join common hyphen linebreaks
+        # Rejoin words split by end-of-line hyphenation in the source PDF.
         txt = re.sub(r"(\w)-\n(\w)", r"\1\2", txt)
         pages.append((i+1, txt))
     return pages
 
-# -------- Section detection for 1880s books --------
+# Section detection for the 1880s books.
 SECTION_PATTERNS = [
     r"MINISTERS['’]\s+DIRECTORY",
     r"STATE\s+SABBATH-?SCHOOL\s+ASSOCIATION\s+DIRECTORIES",
@@ -110,7 +109,7 @@ def split_sections(pages: List[Tuple[int,str]]) -> List[Dict]:
         sections.append(current)
     return sections
 
-# -------- Parsing helpers --------
+# Parsing helpers.
 NAME_TITLES = r"(?:Mrs\.?|Miss|Mr\.?|Eld\.?|Dr\.?)"
 INITIAL = r"(?:[A-Z]\.)"
 WORD = r"(?:[A-Za-z][A-Za-z'\-]*)"
@@ -191,10 +190,9 @@ def map_section_to_group(section_name: str) -> Optional[str]:
     s = section_name.upper()
     if "MINISTERS' DIRECTORY" in s:
         return "ministers"
-    # Directories generally list officers otherwise
     return "officers"
 
-# -------- Section parsers --------
+# Section parsers.
 def parse_directory_block(section_name: str, text: str, year: Optional[int], src_pdf: str, start_page: int) -> List[Row]:
     rows: List[Row] = []
     current_state = None
@@ -202,7 +200,6 @@ def parse_directory_block(section_name: str, text: str, year: Optional[int], src
         line = raw.strip().strip("·•—-")
         if not line:
             continue
-        # state header like "CALIFORNIA."
         if STATE_HEADER_RE.match(line) and len(line.split()) <= 4:
             current_state = line.strip(". ")
             continue
@@ -235,7 +232,7 @@ def parse_directory_block(section_name: str, text: str, year: Optional[int], src
 def parse_ministers_directory(section_name: str, text: str, year: Optional[int], src_pdf: str, start_page: int) -> List[Row]:
     rows: List[Row] = []
     current_state = None
-    current_label = None  # "MINISTERS." or "LICENTIATES."
+    current_label = None
     for raw in text.splitlines():
         line = raw.strip().strip("·•—-")
         if not line:
@@ -247,7 +244,6 @@ def parse_ministers_directory(section_name: str, text: str, year: Optional[int],
         if re.fullmatch(r"(MINISTERS\.|LICENTIATES\.)", line, re.I):
             current_label = line.rstrip(".").upper()
             continue
-        # treat remaining non-empty lines as entries under current_state
         if current_state:
             name_chunk, loc = split_name_and_location(line)
             if not name_chunk:
@@ -256,7 +252,7 @@ def parse_ministers_directory(section_name: str, text: str, year: Optional[int],
             gender = derive_gender(prefix)
             rows.append(Row(
                 conference=current_state,
-                organization="General",  # umbrella
+                organization="General",
                 group="ministers" if current_label == "MINISTERS" else ("licentiates" if current_label == "LICENTIATES" else None),
                 position="minister" if current_label == "MINISTERS" else ("licentiate" if current_label == "LICENTIATES" else None),
                 prefix=prefix,
@@ -271,7 +267,7 @@ def parse_ministers_directory(section_name: str, text: str, year: Optional[int],
             ))
     return rows
 
-# -------- High-level extract --------
+# High-level extraction entry point.
 def guess_year_from_filename(path: str) -> Optional[int]:
     base = os.path.basename(path)
     m = re.search(r"(18\d{2})", base)
@@ -290,11 +286,11 @@ def extract_from_pdf(path: str) -> List[Row]:
             out.extend(parse_directory_block(name, text, year, path, start_page))
     return out
 
-# -------- CSV writing (with optional “copy header from sample CSV”) --------
+# CSV writing helpers.
 def load_schema_from_csv(sample_csv: Optional[str]) -> List[Tuple[str,str]]:
     """
-    If a sample CSV is provided, copy *its exact headers*.
-    We map our internal fields to those headers using a best-effort mapping.
+    Copy the exact headers from a sample CSV when one is provided.
+    Internal fields are matched to those headers with a best-effort mapping.
     """
     if not sample_csv:
         return DEFAULT_SCHEMA
@@ -304,7 +300,7 @@ def load_schema_from_csv(sample_csv: Optional[str]) -> List[Tuple[str,str]]:
         r = csv.reader(f)
         hdrs = next(r)
 
-    # best-effort mapping (case/space/hyphen insensitive)
+    # Match headers case-insensitively and ignore punctuation differences.
     norm = lambda s: re.sub(r"[^a-z0-9]", "", s.lower())
     candidates = {
         "conference": ["conference"],
@@ -333,11 +329,8 @@ def load_schema_from_csv(sample_csv: Optional[str]) -> List[Tuple[str,str]]:
             if any(hnorm == k for k in keys):
                 matched_internal = internal
                 break
-        # if no match, park it as None (we'll write blanks)
         mapping.append((h, matched_internal))
 
-    # Return pairs as (csv_header, internal_field_name)
-    # If sample header didn’t match any internal field, internal_field_name=None
     return mapping
 
 def write_csv(rows: List[Row], out_csv: str, sample_csv: Optional[str] = None):
@@ -352,7 +345,7 @@ def write_csv(rows: List[Row], out_csv: str, sample_csv: Optional[str] = None):
                 row.append(d.get(internal, "") if internal else "")
             w.writerow(row)
 
-# -------- CLI --------
+# CLI entry point.
 def main():
     ap = argparse.ArgumentParser(description="Rule-based extractor for 1880s SDA Yearbooks (e.g., 1883, 1885).")
     ap.add_argument("inputs", nargs="*", help="PDFs or glob patterns (default: YB188*.pdf)")

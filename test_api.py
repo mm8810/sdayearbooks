@@ -1,14 +1,12 @@
-# test_api.py
 """
-Claude sanity test with model-ID fallback.
-Run:  python test_api.py
+Minimal Anthropic connectivity test with model fallback.
+Run: python test_api.py
 """
 
 import os, json
 from anthropic import Anthropic, NotFoundError
 from dotenv import load_dotenv
 
-# Load .env
 load_dotenv()
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 if not ANTHROPIC_API_KEY:
@@ -16,13 +14,11 @@ if not ANTHROPIC_API_KEY:
 
 client = Anthropic(api_key=ANTHROPIC_API_KEY)
 
-# Try these in order; the first that works will be used.
+# Try the model identifiers in order until one succeeds.
 MODEL_CANDIDATES = [
-    # 3.5 series
     "claude-3-5-sonnet-20241022",
     "claude-3-5-sonnet-20240620",
     "claude-3-5-haiku-20241022",
-    # 3.x series
     "claude-3-sonnet-20240229",
     "claude-3-haiku-20240307",
     "claude-3-opus-20240229",
@@ -60,7 +56,6 @@ def main():
             print(f"\n✅ Using model: {m}\n")
             print("--- RAW CLAUDE OUTPUT ---\n")
             print(content)
-            # Parse JSON
             data = json.loads(content)
             print("\n--- PARSED JSON ---\n")
             print(json.dumps(data, indent=2))
@@ -76,7 +71,6 @@ def main():
         except Exception as e:
             print(f"  • Error with {m}: {e}")
             last_error = e
-    # If we get here, none worked.
     raise SystemExit(
         "\n❌ No candidate model IDs worked. "
         "Upgrade the SDK (pip install -U anthropic) and re-run."
@@ -84,4 +78,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

@@ -1,11 +1,8 @@
-
-# rate_limiter.py
 import time, random, threading
 
 class TokenBucket:
     """
-    Limiter for BOTH tokens/min (TPM) and requests/min (RPM).
-    Thread-safe and continuous refill.
+    Token bucket that enforces both tokens-per-minute and requests-per-minute.
     """
     def __init__(self, tokens_per_min: int, requests_per_min: int):
         self.TPM = max(1, int(tokens_per_min))
@@ -42,7 +39,7 @@ class TokenBucket:
 
 def estimate_tokens_from_text(text: str) -> int:
     """
-    ~4 characters per token heuristic to avoid external tokenizers.
+    Roughly estimate token count without depending on a model-specific tokenizer.
     """
     if text is None:
         return 1

@@ -1,4 +1,3 @@
-# ai_prefilter.py
 import re
 from pathlib import Path
 from typing import List, Tuple
@@ -18,18 +17,18 @@ DIRECTORY_HINTS = [
     "MINISTERIAL DIRECTORY", "GENERAL ORGANIZATIONS"
 ]
 
-# Very lightweight state/territory abbreviations commonly found in 1880–1920
+# Common state and territory abbreviations seen in the 1880-1920 yearbooks.
 LOC_ABBREV_RE = re.compile(
     r"\b(Ala\.|Ark\.|Cal\.|Col\.|Dak\.|D\. T\.|Ill\.|Ind\.|Iowa|Kan\.|Ky\.|Me\.|Mass\.|Mich\.|Minn\.|Mo\.|Neb\.|N\. Y\.|N\. H\.|Ohio|Ore\.|Pa\.|Tenn\.|Tex\.|Vt\.|Wis\.|W\. T\.)\b"
 )
 
-STATE_HEADER_RE = re.compile(r"^[A-Z][A-Z '\.-]{2,}$")  # e.g., MAINE., CALIFORNIA.
+STATE_HEADER_RE = re.compile(r"^[A-Z][A-Z '\.-]{2,}$")  # e.g. MAINE., CALIFORNIA.
 
-# Obvious “not interesting” (tune freely)
+# Skip pages that are clearly doctrinal or narrative rather than directory material.
 DOCTRINE_BANLIST = [
     "FUNDAMENTAL PRINCIPLES",
     "STATEMENT OF BELIEF",
-    "OBITUAR",  # obituary sections (if you don't want them)
+    "OBITUAR",
     "SERMON",
     "APPEAL TO",
     "TESTIMONY",
@@ -37,8 +36,8 @@ DOCTRINE_BANLIST = [
 ]
 
 NAME_TOKENS_RE = re.compile(r"\b(Mr\.|Mrs\.|Miss|Eld\.|Dr\.)\b")
-INITIALS_RE = re.compile(r"\b[A-Z]\.\s*(?:[A-Z]\.)?")  # J. H. or J.
-ROLE_LINE_RE = re.compile(r"^[A-Za-z][A-Za-z '\-]*:\s+.+$")  # President: Name, Place
+INITIALS_RE = re.compile(r"\b[A-Z]\.\s*(?:[A-Z]\.)?")
+ROLE_LINE_RE = re.compile(r"^[A-Za-z][A-Za-z '\-]*:\s+.+$")
 
 def read_pdf(page_path: Path) -> List[str]:
     reader = PdfReader(str(page_path))
@@ -49,7 +48,7 @@ def read_pdf(page_path: Path) -> List[str]:
         except Exception:
             t = ""
         t = t.replace("\r", "\n")
-        # unwrap common hyphenation
+        # Rejoin words split across a line break in the source PDF.
         t = re.sub(r"(\w)-\n(\w)", r"\1\2", t)
         out.append(t)
     return out
@@ -60,7 +59,8 @@ def is_doctrine_page(text: str) -> bool:
 
 def score_line(ln: str) -> int:
     """
-    Return an integer score; keep lines with score >= 1.
+    Score a line for directory-like content.
+    Lines with a score of at least 1 are kept.
     """
     s = ln.strip()
     if not s:
@@ -68,19 +68,14 @@ def score_line(ln: str) -> int:
     up = s.upper()
 
     score = 0
-    # directory headers
     if any(h in up for h in DIRECTORY_HINTS):
         score += 3
-    # state header
     if STATE_HEADER_RE.match(s) and len(s.split()) <= 4:
         score += 2
-    # role lines
     if ROLE_LINE_RE.match(s):
         score += 3
-    # mentions role tokens inline
     if any(tok in up for tok in ROLE_TOKENS):
         score += 1
-    # name-ish: honorifics or initials, plus location-ish
     if NAME_TOKENS_RE.search(s) or INITIALS_RE.search(s):
         score += 1
     if LOC_ABBREV_RE.search(s) or s.count(",") >= 2:
@@ -89,7 +84,7 @@ def score_line(ln: str) -> int:
 
 def filter_page(text: str, context: int = 0) -> str:
     """
-    Keep only "interesting" lines + optional context window (0 = none).
+    Keep the likely directory lines plus an optional context window.
     """
     lines = [ln.rstrip() for ln in text.split("\n")]
     keep = [False] * len(lines)
@@ -97,12 +92,11 @@ def filter_page(text: str, context: int = 0) -> str:
     for idx, ln in enumerate(lines):
         if score_line(ln) >= 1:
             keep[idx] = True
-            # include neighbors for context
             for j in range(max(0, idx - context), min(len(lines), idx + context + 1)):
                 keep[j] = True
 
     kept_lines = [ln for ln, k in zip(lines, keep) if k and ln.strip()]
-    # Optional de-dup / compact
+    # Deduplicate repeated lines introduced by extraction quirks.
     deduped = []
     seen = set()
     for ln in kept_lines:
@@ -114,8 +108,7 @@ def filter_page(text: str, context: int = 0) -> str:
 
 def prefilter_pdf_for_ai(pdf_path: str, context_window: int = 0) -> List[Tuple[int, str]]:
     """
-    Returns list of (page_num, filtered_text) for pages that contain
-    interesting lines. Drops pages that look doctrinal or produce empty output.
+    Return the pages whose filtered text still contains likely directory content.
     """
     pages = read_pdf(Path(pdf_path))
     out: List[Tuple[int, str]] = []
